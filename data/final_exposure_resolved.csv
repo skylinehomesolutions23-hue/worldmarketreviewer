@@ -1,0 +1,2 @@
+date,base_exposure,guardrail_exposure,final_exposure,guardrail_reason,override_reason
+2026-01-05,1.0,1.0,1.0,GUARDRAILS_CLEAR,NO_OVERRIDE

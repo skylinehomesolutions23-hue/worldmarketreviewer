@@ -1,0 +1,44 @@
+dataset,rows,start,end,issues,status
+AAPL.csv,0,,,No numeric price column found,FAIL
+AMD.csv,0,,,No numeric price column found,FAIL
+AMZN.csv,0,,,No numeric price column found,FAIL
+ASML.csv,0,,,No numeric price column found,FAIL
+AVGO.csv,0,,,No numeric price column found,FAIL
+BAC.csv,0,,,No numeric price column found,FAIL
+COST.csv,0,,,No numeric price column found,FAIL
+CVX.csv,0,,,No numeric price column found,FAIL
+DIA.csv,0,,,No numeric price column found,FAIL
+DIS.csv,0,,,No numeric price column found,FAIL
+forward_returns.csv,8593,2006-01-31,2025-12-31,EXTREME_RETURN_DETECTED,FAIL
+GLD.csv,0,,,No numeric price column found,FAIL
+good_ranks.csv,0,,,No numeric price column found,FAIL
+GOOGL.csv,0,,,No numeric price column found,FAIL
+GS.csv,0,,,No numeric price column found,FAIL
+HD.csv,0,,,No numeric price column found,FAIL
+INTC.csv,0,,,No numeric price column found,FAIL
+IWM.csv,0,,,No numeric price column found,FAIL
+JPM.csv,0,,,No numeric price column found,FAIL
+META.csv,0,,,No numeric price column found,FAIL
+monthly_prices.csv,9074,2005-01-31,2026-01-31,EXTREME_RETURN_DETECTED,FAIL
+MS.csv,0,,,No numeric price column found,FAIL
+MSFT.csv,0,,,No numeric price column found,FAIL
+MU.csv,0,,,No numeric price column found,FAIL
+NFLX.csv,0,,,No numeric price column found,FAIL
+NVDA.csv,0,,,No numeric price column found,FAIL
+QCOM.csv,0,,,No numeric price column found,FAIL
+QQQ.csv,0,,,No numeric price column found,FAIL
+regime.csv,231,2006-10-31,2025-12-31,EXTREME_RETURN_DETECTED;STALE_PRICES_DETECTED,FAIL
+signals.csv,8630,2006-01-31,2026-01-31,EXTREME_RETURN_DETECTED,FAIL
+signals_rank_filtered.csv,8630,2006-01-31,2026-01-31,EXTREME_RETURN_DETECTED,FAIL
+SLV.csv,0,,,No numeric price column found,FAIL
+SMH.csv,0,,,No numeric price column found,FAIL
+SPY.csv,0,,,No numeric price column found,FAIL
+TLT.csv,0,,,No numeric price column found,FAIL
+TSLA.csv,0,,,No numeric price column found,FAIL
+UNH.csv,0,,,No numeric price column found,FAIL
+UUP.csv,0,,,No numeric price column found,FAIL
+V.csv,0,,,No numeric price column found,FAIL
+VTI.csv,0,,,No numeric price column found,FAIL
+WMT.csv,0,,,No numeric price column found,FAIL
+XLK.csv,0,,,No numeric price column found,FAIL
+XOM.csv,0,,,No numeric price column found,FAIL

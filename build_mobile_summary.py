@@ -5,13 +5,13 @@ from pathlib import Path
 # Config (cross-platform)
 # -----------------------------
 BASE_DIR = Path(__file__).resolve().parent
-RESULTS_DIR = BASE_DIR / "results"
+DATA_DIR = BASE_DIR / "data"   # <- CHANGED FROM results TO data
 
-RETURNS_FILE = RESULTS_DIR / "monthly_returns.csv"
-RISK_FILE = RESULTS_DIR / "integrated_risk_report.csv"
-KILL_FILE = RESULTS_DIR / "signal_lifecycle_decision_v3.csv"
+RETURNS_FILE = DATA_DIR / "monthly_returns.csv"
+RISK_FILE = DATA_DIR / "integrated_risk_report.csv"
+KILL_FILE = DATA_DIR / "signal_lifecycle_decision_v3.csv"
 
-OUTPUT_FILE = RESULTS_DIR / "mobile_summary.csv"
+OUTPUT_FILE = DATA_DIR / "mobile_summary.csv"
 
 
 def find_date_column(df):
@@ -95,7 +95,7 @@ def main():
     }])
 
     # -----------------------------
-    # Make JSON-safe (critical fix)
+    # Make JSON-safe
     # -----------------------------
     summary = summary.replace([float("inf"), float("-inf")], 0)
     summary = summary.fillna(0)

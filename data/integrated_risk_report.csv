@@ -1,0 +1,3 @@
+beta_3m,vol_3m,max_dd_3m,beta_6m,vol_6m,max_dd_6m,beta_12m,vol_12m,max_dd_12m,section,tail_obs,spy_tail_mean,portfolio_tail_mean,tail_corr,portfolio_tail_max_dd
+-0.0232433412139084,0.8269186226944556,-0.1931696956032512,0.0135953377437706,0.7512287747978363,-0.1931696956032512,,,,rolling_risk_latest,,,,,
+,,,,,,,,,tail_dependency,14.0,-0.1051115115806145,0.0237159011699019,-0.5469676968882041,-0.1217084191553887

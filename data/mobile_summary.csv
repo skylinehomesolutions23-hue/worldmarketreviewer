@@ -1,0 +1,2 @@
+date,status,recommended_exposure,rolling_net_return,vol_3m,max_drawdown_3m,tail_correlation,kill_signal,reason
+2026-01-01 00:00:00,RISK_ON,1.0,0.0,0.0,0.0,-0.547,False,EDGE_HEALTHY
