@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from build_mobile_summary import main as build_summary
+print("API FILE LOADED SUCCESSFULLY")
 
 app = FastAPI()
 
