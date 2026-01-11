@@ -1,0 +1,8 @@
+{
+  "markets": [
+    { "name": "S&P 500", "value": 5234.2, "change": 0.6 },
+    { "name": "Nasdaq", "value": 16210.4, "change": 1.1 },
+    { "name": "DAX", "value": 17022.0, "change": -0.3 },
+    { "name": "Nikkei", "value": 36540.1, "change": 0.9 }
+  ]
+}

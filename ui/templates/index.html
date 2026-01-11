@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>World Markets</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #111;
+      color: #fff;
+      margin: 0;
+      padding: 16px;
+    }
+    h2 {
+      margin-bottom: 12px;
+    }
+    .market {
+      padding: 12px;
+      border-bottom: 1px solid #333;
+      font-size: 18px;
+    }
+    .green { color: #4caf50; }
+    .red { color: #f44336; }
+  </style>
+</head>
+<body>
+
+<h2>World Markets</h2>
+<div id="markets">Loading…</div>
+
+<script>
+const API_URL = "http://192.168.1.153:5000/markets";
+
+fetch(API_URL)
+  .then(res => res.json())
+  .then(data => {
+    const container = document.getElementById("markets");
+    container.innerHTML = "";
+
+    data.markets.forEach(m => {
+      const div = document.createElement("div");
+      div.className = "market " + (m.change >= 0 ? "green" : "red");
+      div.textContent = `${m.name}: ${m.value} (${m.change}%)`;
+      container.appendChild(div);
+    });
+  })
+  .catch(() => {
+    document.getElementById("markets").textContent =
+      "Failed to load market data";
+  });
+</script>
+
+</body>
+</html>

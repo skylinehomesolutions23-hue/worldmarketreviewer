@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>World Market Reviewer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="container">
+    <h1>📊 Market Status</h1>
+
+    <div class="status {{ color }}">
+        {{ status }}
+    </div>
+
+    <p class="explanation">{{ explanation }}</p>
+
+    <form method="post">
+        <label>Experience</label>
+        <select name="experience_level">
+            <option value="beginner" {% if prefs.experience_level == "beginner" %}selected{% endif %}>Beginner</option>
+            <option value="pro" {% if prefs.experience_level == "pro" %}selected{% endif %}>Pro</option>
+        </select>
+
+        <label>Explanation Mode</label>
+        <select name="explanation_mode">
+            <option value="auto">Auto</option>
+            <option value="green">Green</option>
+            <option value="yellow">Yellow</option>
+            <option value="red">Red</option>
+        </select>
+
+        <button type="submit">Apply</button>
+    </form>
+</div>
+
+</body>
+</html>

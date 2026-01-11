@@ -1,0 +1,22 @@
+{
+  "regime_filter": {
+    "spy_ma_window": 10
+  },
+  "vol_targeting": {
+    "target_vol": 0.10,
+    "lookback_months": 6,
+    "max_leverage": 1.5
+  },
+  "beta_targeting": {
+    "target_beta": 0.0,
+    "lookback_months": 6,
+    "max_beta_shift": 0.3
+  },
+  "guardrails": {
+    "max_vol_spike_std": 3.0,
+    "min_history_months": 12
+  },
+  "capital_allocation": {
+    "allow_leverage": false
+  }
+}
