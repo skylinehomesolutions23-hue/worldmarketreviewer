@@ -8,179 +8,157 @@
 <style>
 body {
   font-family: Arial;
-  background: #0f172a;
-  color: white;
-  padding: 16px;
+  background:#0f172a;
+  color:white;
+  padding:15px;
 }
 
-h1 {
-  margin-bottom: 6px;
-}
-
-.subtitle {
-  opacity: 0.6;
-  font-size: 14px;
-  margin-bottom: 14px;
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 12px;
-}
+h1 { margin-bottom:10px }
 
 .card {
-  background: #1e293b;
-  padding: 16px;
-  border-radius: 14px;
+  background:#1e293b;
+  padding:15px;
+  border-radius:14px;
+  margin-bottom:12px;
+  box-shadow: 0 0 10px rgba(0,0,0,0.3);
 }
 
-.status {
-  font-size: 26px;
-  font-weight: bold;
+.row { display:flex; gap:10px; flex-wrap:wrap; }
+
+.metric { flex:1; min-width:140px; }
+
+.label { font-size:12px; opacity:0.7; }
+
+.value { font-size:22px; font-weight:bold; }
+
+.badge {
+  padding:6px 10px;
+  border-radius:10px;
+  font-weight:bold;
+  display:inline-block;
 }
 
-.risk-on { color: #22c55e; }
-.risk-off { color: #ef4444; }
+.risk_on { background:#16a34a; }
+.risk_off { background:#f97316; }
+.kill { background:#dc2626; }
 
-.metric-row {
-  display: flex;
-  justify-content: space-between;
-  margin: 6px 0;
+.bar {
+  background:#334155;
+  border-radius:10px;
+  overflow:hidden;
+  height:18px;
 }
 
-.bar-container {
-  background: #334155;
-  border-radius: 10px;
-  overflow: hidden;
-  height: 16px;
-}
-
-.bar-fill {
-  background: #3b82f6;
-  height: 100%;
-  width: 0%;
-  transition: width 0.5s;
+.fill {
+  background:#3b82f6;
+  height:100%;
+  text-align:right;
+  padding-right:6px;
+  font-size:12px;
 }
 
 button {
-  padding: 10px;
-  border: none;
-  border-radius: 10px;
-  cursor: pointer;
-  color: white;
-  font-weight: bold;
+  padding:10px;
+  border:none;
+  border-radius:10px;
+  margin:4px;
+  cursor:pointer;
+  font-weight:bold;
 }
 
-.green { background:#16a34a }
-.blue { background:#2563eb }
-.orange { background:#f97316 }
-
-button:hover { opacity: 0.85; }
-
-.footer {
-  opacity: 0.5;
-  font-size: 12px;
-  text-align: center;
-}
+.green { background:#16a34a; color:white }
+.blue { background:#2563eb; color:white }
+.orange { background:#f97316; color:white }
 </style>
 </head>
 
 <body>
 
 <h1>📈 WorldMarketReviewer</h1>
-<div class="subtitle" id="updated">Last updated: —</div>
 
-<div class="grid">
-
-  <div class="card">
-    <div id="status" class="status">Loading...</div>
-    <div id="reason" style="opacity:0.8;margin-top:4px;">—</div>
-  </div>
-
-  <div class="card">
-    <strong>Exposure</strong>
-    <div class="bar-container" style="margin-top:8px;">
-      <div id="exposure-bar" class="bar-fill"></div>
-    </div>
-    <div id="exposure-text" style="margin-top:6px;">0%</div>
-  </div>
-
-  <div class="card">
-    <strong>Active Profile:</strong>
-    <span id="profile">Loading...</span>
-  </div>
-
-  <div class="card">
-    <button class="green" onclick="setProfile('conservative')">Conservative</button>
-    <button class="blue" onclick="setProfile('balanced')">Balanced</button>
-    <button class="orange" onclick="setProfile('aggressive')">Aggressive</button>
-  </div>
-
-  <div class="card">
-    <strong>Key Metrics</strong>
-    <div class="metric-row"><span>Volatility (3m)</span><span id="vol">—</span></div>
-    <div class="metric-row"><span>Max Drawdown (3m)</span><span id="dd">—</span></div>
-    <div class="metric-row"><span>Tail Correlation</span><span id="tail">—</span></div>
-    <div class="metric-row"><span>Kill Signal</span><span id="kill">—</span></div>
-  </div>
-
-  <div class="card">
-    <strong>Exposure History</strong>
-    <canvas id="chart" style="margin-top:10px;"></canvas>
-  </div>
-
+<div class="card">
+  <div class="label">Active Profile</div>
+  <div class="value" id="profile">Loading...</div>
 </div>
 
-<div class="footer">Auto-refreshes every 60 seconds</div>
+<div class="card">
+  <button class="green" onclick="setProfile('conservative')">Conservative</button>
+  <button class="blue" onclick="setProfile('balanced')">Balanced</button>
+  <button class="orange" onclick="setProfile('aggressive')">Aggressive</button>
+</div>
+
+<div class="card">
+  <div class="label">System Status</div>
+  <div id="status"></div>
+</div>
+
+<div class="card">
+  <div class="label">Recommended Exposure</div>
+  <div class="bar">
+    <div id="exposureFill" class="fill" style="width:0%">0%</div>
+  </div>
+</div>
+
+<div class="card row">
+  <div class="metric">
+    <div class="label">Volatility (3m)</div>
+    <div class="value" id="vol">-</div>
+  </div>
+  <div class="metric">
+    <div class="label">Max Drawdown (3m)</div>
+    <div class="value" id="dd">-</div>
+  </div>
+  <div class="metric">
+    <div class="label">Tail Correlation</div>
+    <div class="value" id="tail">-</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="label">Reason</div>
+  <div id="reason"></div>
+</div>
+
+<div class="card">
+  <canvas id="chart"></canvas>
+</div>
 
 <script>
 let chartInstance = null;
 
-function formatPct(value) {
-  return (value * 100).toFixed(1) + "%";
-}
-
-function formatNum(value) {
-  return Number(value).toFixed(3);
-}
-
 async function loadAll() {
   try {
-    const summary = await fetch("/api/summary").then(r => r.json());
-    const config = await fetch("/api/config").then(r => r.json());
-    const hist = await fetch("/api/history").then(r => r.json());
+    const summary = await fetch("/api/summary").then(r=>r.json());
+    const config = await fetch("/api/config").then(r=>r.json());
+    const hist = await fetch("/api/history").then(r=>r.json());
 
-    // Timestamp
-    document.getElementById("updated").innerText =
-      "Last updated: " + new Date().toLocaleTimeString();
-
-    // Status
-    const statusEl = document.getElementById("status");
-    statusEl.innerText = summary.status;
-    statusEl.className = "status " + (summary.status === "RISK_ON" ? "risk-on" : "risk-off");
-
-    document.getElementById("reason").innerText = summary.reason;
-
-    // Exposure
-    const pct = Math.round(summary.recommended_exposure * 100);
-    document.getElementById("exposure-bar").style.width = pct + "%";
-    document.getElementById("exposure-text").innerText = pct + "%";
-
-    // Profile
     document.getElementById("profile").innerText = config.active_profile;
 
+    // Status badge
+    const statusEl = document.getElementById("status");
+    const cls = summary.status === "RISK_ON" ? "risk_on" :
+                summary.status === "RISK_OFF" ? "risk_off" : "kill";
+    statusEl.innerHTML = `<span class="badge ${cls}">${summary.status}</span>`;
+
+    // Exposure bar
+    const pct = Math.round(summary.recommended_exposure * 100);
+    const fill = document.getElementById("exposureFill");
+    fill.style.width = Math.min(pct, 150) + "%";
+    fill.innerText = pct + "%";
+
     // Metrics
-    document.getElementById("vol").innerText = formatNum(summary.vol_3m);
-    document.getElementById("dd").innerText = formatNum(summary.max_drawdown_3m);
-    document.getElementById("tail").innerText = formatNum(summary.tail_correlation);
-    document.getElementById("kill").innerText = summary.kill_signal ? "YES" : "NO";
+    document.getElementById("vol").innerText = summary.vol_3m;
+    document.getElementById("dd").innerText = summary.max_drawdown_3m;
+    document.getElementById("tail").innerText = summary.tail_correlation;
+    document.getElementById("reason").innerText = summary.reason;
 
     // Chart
-    const labels = hist.map(h => h.timestamp.slice(0, 10)).reverse();
+    const labels = hist.map(h => h.timestamp.slice(0,10)).reverse();
     const exp = hist.map(h => h.exposure).reverse();
 
-    if (chartInstance) chartInstance.destroy();
+    if (chartInstance) {
+      chartInstance.destroy();
+    }
 
     chartInstance = new Chart(document.getElementById("chart"), {
       type: "line",
@@ -189,22 +167,23 @@ async function loadAll() {
         datasets: [{
           label: "Exposure",
           data: exp,
-          borderWidth: 2,
           tension: 0.3
         }]
       }
     });
 
   } catch (err) {
-    console.error("Dashboard load failed:", err);
+    console.error("Dashboard error:", err);
   }
 }
 
-// Auto refresh every 60 seconds
-setInterval(loadAll, 60000);
+async function setProfile(profile) {
+  await fetch(`/api/profile/${profile}`, { method: "POST" });
+  loadAll();
+}
 
-// Initial load
 loadAll();
+setInterval(loadAll, 30000); // auto refresh every 30s
 </script>
 
 </body>
