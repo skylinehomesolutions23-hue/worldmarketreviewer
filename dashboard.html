@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorldMarketReviewer</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+body { font-family: Arial; background:#0f172a; color:white; padding:15px }
+.card { background:#1e293b; padding:15px; border-radius:12px; margin-bottom:10px }
+button { padding:10px; border:none; border-radius:8px }
+</style>
+</head>
+<body>
+
+<h2>📈 WorldMarketReviewer</h2>
+
+<div class="card">
+  <pre id="summary">Loading...</pre>
+</div>
+
+<div class="card">
+  <canvas id="chart"></canvas>
+</div>
+
+<script>
+async function load(){
+  const summary = await fetch("/api/summary").then(r=>r.json());
+  document.getElementById("summary").innerText = JSON.stringify(summary,null,2);
+
+  const hist = await fetch("/api/history").then(r=>r.json());
+  const labels = hist.map(h=>h.timestamp.slice(0,10));
+  const exp = hist.map(h=>h.exposure);
+
+  new Chart(document.getElementById("chart"), {
+    type: "line",
+    data: { labels, datasets:[{label:"Exposure", data:exp}] }
+  });
+}
+load();
+</script>
+
+</body>
+</html>
