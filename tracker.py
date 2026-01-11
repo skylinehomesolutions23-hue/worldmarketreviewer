@@ -1,27 +1,49 @@
 # tracker.py
 
-from datetime import datetime
-from database import save_history, get_history
+import datetime
+from database import insert_row, fetch_recent
 from logger import log
+
+_last_update = None
 
 
 def record(summary: dict):
-    """
-    Records a snapshot into historical database.
-    """
-    timestamp = datetime.utcnow().isoformat()
+    global _last_update
 
-    save_history(
-        timestamp=timestamp,
+    ts = datetime.datetime.utcnow().isoformat()
+    _last_update = ts
+
+    insert_row(
+        timestamp=ts,
+        status=summary["status"],
         exposure=summary["recommended_exposure"],
-        status=summary["status"]
+        vol=summary["vol_3m"],
+        drawdown=summary["max_drawdown_3m"],
     )
 
     log(f"Recorded snapshot: {summary['status']} exposure={summary['recommended_exposure']}")
 
 
 def get_recent(limit=200):
-    """
-    Returns recent history for API/dashboard.
-    """
-    return get_history(limit)
+    return fetch_recent(limit)
+
+
+def get_health():
+    """Returns system health info"""
+    if not _last_update:
+        return {
+            "status": "STALE",
+            "last_update": None
+        }
+
+    last = datetime.datetime.fromisoformat(_last_update)
+    now = datetime.datetime.utcnow()
+    delta = (now - last).total_seconds()
+
+    healthy = delta < 120  # 2 minutes threshold
+
+    return {
+        "status": "OK" if healthy else "STALE",
+        "last_update": _last_update,
+        "seconds_since_update": round(delta, 1)
+    }

@@ -2,16 +2,14 @@
 
 import threading
 import time
-
 from build_mobile_summary import main
 from logger import log
 
-INTERVAL_SECONDS = 60 * 30  # every 30 minutes
+INTERVAL_SECONDS = 60 * 30  # 30 minutes
+_started = False
 
-_scheduler_started = False
 
-
-def _loop():
+def loop():
     log("Scheduler started")
     while True:
         try:
@@ -23,12 +21,12 @@ def _loop():
 
 
 def start():
-    global _scheduler_started
+    global _started
 
-    if _scheduler_started:
-        log("Scheduler already running, skipping second start")
+    if _started:
+        log("Scheduler already running, skipping duplicate start")
         return
 
-    _scheduler_started = True
-    thread = threading.Thread(target=_loop, daemon=True)
+    _started = True
+    thread = threading.Thread(target=loop, daemon=True)
     thread.start()

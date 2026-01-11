@@ -1,55 +1,75 @@
-# api.py
-
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+import json
 from pathlib import Path
 
 from build_mobile_summary import main
-from tracker import get_recent
-from profile_manager import set_active_profile, load_config
-from scheduler import start as start_scheduler
-from database import init_db
+from tracker import get_recent, get_health
+from scheduler import start
 
 app = FastAPI()
 
+# Start scheduler safely (won't duplicate)
+start()
+
 BASE_DIR = Path(__file__).resolve().parent
-DASHBOARD_FILE = BASE_DIR / "dashboard.html"
+CONFIG_FILE = BASE_DIR / "config.json"
+DASHBOARD = BASE_DIR / "dashboard.html"
 
 
-@app.on_event("startup")
-def startup_event():
-    init_db()
-    start_scheduler()
+# -----------------------------
+# Helpers
+# -----------------------------
+
+def load_config():
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
 
 
-# -------------------------
-# Serve dashboard UI
-# -------------------------
-@app.get("/", response_class=HTMLResponse)
-def dashboard():
-    if DASHBOARD_FILE.exists():
-        return DASHBOARD_FILE.read_text(encoding="utf-8")
-    return "<h1>dashboard.html not found</h1>"
+def save_config(data):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 
-# -------------------------
-# API endpoints
-# -------------------------
+# -----------------------------
+# Routes
+# -----------------------------
+
+@app.get("/")
+def home():
+    return FileResponse(DASHBOARD)
+
+
 @app.get("/api/summary")
 def get_summary():
     return main()
 
 
-@app.get("/api/history")
-def history():
-    return get_recent()
-
-
-@app.post("/api/profile/{profile_name}")
-def set_profile(profile_name: str):
-    return set_active_profile(profile_name)
-
-
 @app.get("/api/config")
-def config():
-    return load_config()
+def get_config():
+    config = load_config()
+    return {"active_profile": config.get("active_profile", "unknown")}
+
+
+@app.post("/api/profile/{profile}")
+def set_profile(profile: str):
+    config = load_config()
+
+    if profile not in config["profiles"]:
+        return {"error": "Invalid profile"}
+
+    config["active_profile"] = profile
+    save_config(config)
+
+    return {"status": "ok", "active_profile": profile}
+
+
+@app.get("/api/history")
+def get_history():
+    return get_recent(200)
+
+
+@app.get("/api/health")
+def health():
+    return get_health()

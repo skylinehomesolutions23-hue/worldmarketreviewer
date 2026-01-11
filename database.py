@@ -1,140 +1,100 @@
-# database.py
-
 import sqlite3
 from pathlib import Path
-from datetime import datetime
+import json
 
-DB_PATH = Path("data.db")
+# -----------------------------
+# Paths
+# -----------------------------
 
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+DATA_DIR.mkdir(exist_ok=True)
+
+DB_PATH = DATA_DIR / "history.db"
+SUMMARY_PATH = DATA_DIR / "latest_summary.json"
+
+
+# -----------------------------
+# Connection
+# -----------------------------
 
 def get_connection():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
+
+# -----------------------------
+# Init DB
+# -----------------------------
 
 def init_db():
     with get_connection() as conn:
-        cur = conn.cursor()
-
-        # Stores latest summary only
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS summary (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            timestamp TEXT,
-            status TEXT,
-            recommended_exposure REAL,
-            rolling_net_return REAL,
-            vol_3m REAL,
-            max_drawdown_3m REAL,
-            tail_correlation REAL,
-            kill_signal INTEGER,
-            reason TEXT,
-            profile TEXT
-        )
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                status TEXT,
+                exposure REAL,
+                vol REAL,
+                drawdown REAL
+            )
         """)
-
-        # Stores historical snapshots
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT UNIQUE,
-            exposure REAL,
-            status TEXT
-        )
-        """)
-
         conn.commit()
 
 
-def save_summary(data: dict):
-    init_db()
-    now = datetime.utcnow().isoformat()
+init_db()
 
+
+# -----------------------------
+# History functions (tracker.py)
+# -----------------------------
+
+def insert_row(timestamp, status, exposure, vol, drawdown):
     with get_connection() as conn:
-        cur = conn.cursor()
-
-        cur.execute("""
-        INSERT INTO summary (
-            id, timestamp, status, recommended_exposure, rolling_net_return,
-            vol_3m, max_drawdown_3m, tail_correlation,
-            kill_signal, reason, profile
-        ) VALUES (
-            1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        )
-        ON CONFLICT(id) DO UPDATE SET
-            timestamp = excluded.timestamp,
-            status = excluded.status,
-            recommended_exposure = excluded.recommended_exposure,
-            rolling_net_return = excluded.rolling_net_return,
-            vol_3m = excluded.vol_3m,
-            max_drawdown_3m = excluded.max_drawdown_3m,
-            tail_correlation = excluded.tail_correlation,
-            kill_signal = excluded.kill_signal,
-            reason = excluded.reason,
-            profile = excluded.profile
-        """, (
-            now,
-            data["status"],
-            data["recommended_exposure"],
-            data["rolling_net_return"],
-            data["vol_3m"],
-            data["max_drawdown_3m"],
-            data["tail_correlation"],
-            int(data["kill_signal"]),
-            data["reason"],
-            data["profile"]
-        ))
-
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO history (timestamp, status, exposure, vol, drawdown)
+            VALUES (?, ?, ?, ?, ?)
+        """, (timestamp, status, exposure, vol, drawdown))
         conn.commit()
 
 
-def save_history(timestamp: str, exposure: float, status: str):
-    init_db()
-
+def fetch_recent(limit=200):
     with get_connection() as conn:
-        cur = conn.cursor()
-        try:
-            cur.execute("""
-                INSERT INTO history (timestamp, exposure, status)
-                VALUES (?, ?, ?)
-            """, (timestamp, exposure, status))
-            conn.commit()
-        except sqlite3.IntegrityError:
-            # duplicate timestamp → ignore safely
-            pass
-
-
-def get_latest_summary():
-    init_db()
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM summary WHERE id = 1")
-        row = cur.fetchone()
-
-    if not row:
-        return {}
-
-    keys = [
-        "id", "timestamp", "status", "recommended_exposure",
-        "rolling_net_return", "vol_3m", "max_drawdown_3m",
-        "tail_correlation", "kill_signal", "reason", "profile"
-    ]
-
-    return dict(zip(keys, row))
-
-
-def get_history(limit=100):
-    init_db()
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT timestamp, exposure, status
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT timestamp, status, exposure, vol, drawdown
             FROM history
-            ORDER BY timestamp DESC
+            ORDER BY id DESC
             LIMIT ?
         """, (limit,))
-        rows = cur.fetchall()
 
-    return [
-        {"timestamp": r[0], "exposure": r[1], "status": r[2]}
-        for r in rows
-    ]
+        rows = cursor.fetchall()
+
+        return [
+            {
+                "timestamp": r[0],
+                "status": r[1],
+                "exposure": r[2],
+                "vol": r[3],
+                "drawdown": r[4],
+            }
+            for r in rows
+        ]
+
+
+# -----------------------------
+# Summary functions (build_mobile_summary.py)
+# -----------------------------
+
+def save_summary(summary: dict):
+    with open(SUMMARY_PATH, "w") as f:
+        json.dump(summary, f, indent=2)
+
+
+def load_summary():
+    if not SUMMARY_PATH.exists():
+        return None
+
+    with open(SUMMARY_PATH, "r") as f:
+        return json.load(f)

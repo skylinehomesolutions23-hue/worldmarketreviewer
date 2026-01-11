@@ -13,49 +13,29 @@ body {
   padding:15px;
 }
 
-h1 { margin-bottom:10px }
-
 .card {
   background:#1e293b;
   padding:15px;
   border-radius:14px;
   margin-bottom:12px;
-  box-shadow: 0 0 10px rgba(0,0,0,0.3);
 }
 
-.row { display:flex; gap:10px; flex-wrap:wrap; }
+.row { display:flex; gap:12px; flex-wrap:wrap; }
 
 .metric { flex:1; min-width:140px; }
 
 .label { font-size:12px; opacity:0.7; }
-
 .value { font-size:22px; font-weight:bold; }
 
 .badge {
-  padding:6px 10px;
+  padding:6px 12px;
   border-radius:10px;
   font-weight:bold;
   display:inline-block;
 }
 
-.risk_on { background:#16a34a; }
-.risk_off { background:#f97316; }
-.kill { background:#dc2626; }
-
-.bar {
-  background:#334155;
-  border-radius:10px;
-  overflow:hidden;
-  height:18px;
-}
-
-.fill {
-  background:#3b82f6;
-  height:100%;
-  text-align:right;
-  padding-right:6px;
-  font-size:12px;
-}
+.ok { background:#16a34a; }
+.stale { background:#dc2626; }
 
 button {
   padding:10px;
@@ -76,47 +56,27 @@ button {
 
 <h1>📈 WorldMarketReviewer</h1>
 
-<div class="card">
-  <div class="label">Active Profile</div>
-  <div class="value" id="profile">Loading...</div>
+<div class="card row">
+  <div class="metric">
+    <div class="label">Active Profile</div>
+    <div class="value" id="profile">Loading...</div>
+  </div>
+
+  <div class="metric">
+    <div class="label">System Health</div>
+    <div id="health" class="badge">Loading...</div>
+  </div>
+
+  <div class="metric">
+    <div class="label">Last Update</div>
+    <div class="value" id="lastUpdate">--</div>
+  </div>
 </div>
 
 <div class="card">
   <button class="green" onclick="setProfile('conservative')">Conservative</button>
   <button class="blue" onclick="setProfile('balanced')">Balanced</button>
   <button class="orange" onclick="setProfile('aggressive')">Aggressive</button>
-</div>
-
-<div class="card">
-  <div class="label">System Status</div>
-  <div id="status"></div>
-</div>
-
-<div class="card">
-  <div class="label">Recommended Exposure</div>
-  <div class="bar">
-    <div id="exposureFill" class="fill" style="width:0%">0%</div>
-  </div>
-</div>
-
-<div class="card row">
-  <div class="metric">
-    <div class="label">Volatility (3m)</div>
-    <div class="value" id="vol">-</div>
-  </div>
-  <div class="metric">
-    <div class="label">Max Drawdown (3m)</div>
-    <div class="value" id="dd">-</div>
-  </div>
-  <div class="metric">
-    <div class="label">Tail Correlation</div>
-    <div class="value" id="tail">-</div>
-  </div>
-</div>
-
-<div class="card">
-  <div class="label">Reason</div>
-  <div id="reason"></div>
 </div>
 
 <div class="card">
@@ -128,33 +88,14 @@ let chartInstance = null;
 
 async function loadAll() {
   try {
-    const summary = await fetch("/api/summary").then(r=>r.json());
-    const config = await fetch("/api/config").then(r=>r.json());
-    const hist = await fetch("/api/history").then(r=>r.json());
+    const summary = await fetch("/api/summary").then(r => r.json());
+    const config = await fetch("/api/config").then(r => r.json());
+    const hist = await fetch("/api/history").then(r => r.json());
 
     document.getElementById("profile").innerText = config.active_profile;
 
-    // Status badge
-    const statusEl = document.getElementById("status");
-    const cls = summary.status === "RISK_ON" ? "risk_on" :
-                summary.status === "RISK_OFF" ? "risk_off" : "kill";
-    statusEl.innerHTML = `<span class="badge ${cls}">${summary.status}</span>`;
-
-    // Exposure bar
-    const pct = Math.round(summary.recommended_exposure * 100);
-    const fill = document.getElementById("exposureFill");
-    fill.style.width = Math.min(pct, 150) + "%";
-    fill.innerText = pct + "%";
-
-    // Metrics
-    document.getElementById("vol").innerText = summary.vol_3m;
-    document.getElementById("dd").innerText = summary.max_drawdown_3m;
-    document.getElementById("tail").innerText = summary.tail_correlation;
-    document.getElementById("reason").innerText = summary.reason;
-
-    // Chart
-    const labels = hist.map(h => h.timestamp.slice(0,10)).reverse();
-    const exp = hist.map(h => h.exposure).reverse();
+    const labels = hist.map(h => h.timestamp.slice(0,19).replace("T", " "));
+    const exp = hist.map(h => h.exposure);
 
     if (chartInstance) {
       chartInstance.destroy();
@@ -171,6 +112,18 @@ async function loadAll() {
         }]
       }
     });
+
+    // Health check
+    const health = await fetch("/api/health").then(r => r.json());
+
+    const healthEl = document.getElementById("health");
+    healthEl.innerText = health.status;
+    healthEl.className = "badge " + (health.status === "OK" ? "ok" : "stale");
+
+    document.getElementById("lastUpdate").innerText =
+      health.last_update
+        ? health.last_update.replace("T", " ").slice(0,19)
+        : "--";
 
   } catch (err) {
     console.error("Dashboard error:", err);
