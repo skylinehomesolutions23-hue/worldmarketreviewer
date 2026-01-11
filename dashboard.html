@@ -4,10 +4,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WorldMarketReviewer</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
 <style>
 body { font-family: Arial; background:#0f172a; color:white; padding:15px }
-.card { background:#1e293b; padding:15px; border-radius:12px; margin-bottom:10px }
-button { padding:10px; border:none; border-radius:8px }
+.card { background:#1e293b; padding:15px; border-radius:12px; margin-bottom:12px }
+.big { font-size:22px; font-weight:bold }
+.green { color:#4ade80 }
+.yellow { color:#facc15 }
+.red { color:#f87171 }
+small { opacity:0.7 }
 </style>
 </head>
 <body>
@@ -15,7 +20,12 @@ button { padding:10px; border:none; border-radius:8px }
 <h2>📈 WorldMarketReviewer</h2>
 
 <div class="card">
-  <pre id="summary">Loading...</pre>
+  <div>Status: <span id="status" class="big">Loading...</span></div>
+  <div>Exposure: <span id="exposure"></span></div>
+  <div>Volatility (3m): <span id="vol"></span></div>
+  <div>Drawdown (3m): <span id="dd"></span></div>
+  <div>Tail Corr: <span id="tail"></span></div>
+  <div><small id="reason"></small></div>
 </div>
 
 <div class="card">
@@ -23,20 +33,64 @@ button { padding:10px; border:none; border-radius:8px }
 </div>
 
 <script>
-async function load(){
-  const summary = await fetch("/api/summary").then(r=>r.json());
-  document.getElementById("summary").innerText = JSON.stringify(summary,null,2);
+let chart;
 
-  const hist = await fetch("/api/history").then(r=>r.json());
-  const labels = hist.map(h=>h.timestamp.slice(0,10));
-  const exp = hist.map(h=>h.exposure);
+async function load() {
+  try {
+    // --- Summary ---
+    const summary = await fetch("/api/summary").then(r => r.json());
 
-  new Chart(document.getElementById("chart"), {
-    type: "line",
-    data: { labels, datasets:[{label:"Exposure", data:exp}] }
-  });
+    const statusEl = document.getElementById("status");
+    statusEl.innerText = summary.status;
+
+    statusEl.className = "big " +
+      (summary.status === "RISK_ON" ? "green" :
+       summary.status === "RISK_OFF" ? "yellow" :
+       "red");
+
+    document.getElementById("exposure").innerText = summary.recommended_exposure;
+    document.getElementById("vol").innerText = summary.vol_3m;
+    document.getElementById("dd").innerText = summary.max_drawdown_3m;
+    document.getElementById("tail").innerText = summary.tail_correlation;
+    document.getElementById("reason").innerText = summary.reason;
+
+    // --- History Chart ---
+    const hist = await fetch("/api/history").then(r => r.json());
+
+    const labels = hist.map(h => h.timestamp.slice(0,10));
+    const exp = hist.map(h => h.exposure);
+
+    if (chart) chart.destroy();
+
+    chart = new Chart(document.getElementById("chart"), {
+      type: "line",
+      data: {
+        labels,
+        datasets: [{
+          label: "Exposure",
+          data: exp,
+          borderWidth: 2,
+          tension: 0.3
+        }]
+      },
+      options: {
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { min: 0, max: 1 }
+        }
+      }
+    });
+
+  } catch (err) {
+    console.error("Dashboard error:", err);
+  }
 }
+
+// Initial load
 load();
+
+// Auto refresh every 30 seconds
+setInterval(load, 30000);
 </script>
 
 </body>
