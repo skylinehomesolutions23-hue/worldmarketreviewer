@@ -1,32 +1,29 @@
 from fastapi import FastAPI
-from build_mobile_summary import main as build_summary
-print("API FILE LOADED SUCCESSFULLY")
+from fastapi.responses import JSONResponse
+import traceback
+
+from build_mobile_summary import main
 
 app = FastAPI()
 
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "WorldMarketReviewer API is running"}
 
 @app.get("/api/summary")
 def get_summary():
-    """
-    Returns the latest mobile summary.
-    """
     try:
-        return build_summary()
+        result = main()
+        return result
     except Exception as e:
-        return {"error": str(e)}
+        # This ensures we actually see the real error in Render logs
+        print("🔥 ERROR in /api/summary")
+        traceback.print_exc()
 
-
-@app.get("/api/health")
-def health():
-    """
-    Simple health check.
-    """
-    return {"status": "ok"}
-
-
-@app.get("/")
-def root():
-    """
-    Root route so Render doesn't show Not Found.
-    """
-    return {"message": "WorldMarketReviewer API running"}
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "summary_failed",
+                "details": str(e)
+            }
+        )
