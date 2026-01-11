@@ -1,22 +1,27 @@
 import pandas as pd
+import json
 from pathlib import Path
 from tracker import record
 
 # -----------------------------
-# Config (cross-platform paths)
+# Paths
 # -----------------------------
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
+CONFIG_FILE = BASE_DIR / "config.json"
 
 RETURNS_FILE = DATA_DIR / "monthly_returns.csv"
 RISK_FILE = DATA_DIR / "integrated_risk_report.csv"
 KILL_FILE = DATA_DIR / "signal_lifecycle_decision_v3.csv"
-
 OUTPUT_FILE = DATA_DIR / "mobile_summary.csv"
 
 
+def load_config():
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
+
+
 def find_date_column(df):
-    """Find a usable date column or fall back to index"""
     for col in df.columns:
         if col.lower() in ["date", "month", "period", "timestamp"]:
             return col
@@ -25,14 +30,31 @@ def find_date_column(df):
 
 def main():
     # -----------------------------
-    # Validate inputs
+    # Load config
+    # -----------------------------
+    config = load_config()
+
+    active_profile = config["active_profile"]
+    profile = config["profiles"][active_profile]
+
+    vol_threshold = profile["risk_rules"]["volatility_threshold"]
+    dd_threshold = profile["risk_rules"]["drawdown_threshold"]
+
+    exposure_risk_on = profile["exposure_levels"]["risk_on"]
+    exposure_risk_off = profile["exposure_levels"]["risk_off"]
+    exposure_kill = profile["exposure_levels"]["kill"]
+
+    labels = config["labels"]
+
+    # -----------------------------
+    # Validate files
     # -----------------------------
     for f in [RETURNS_FILE, RISK_FILE, KILL_FILE]:
         if not f.exists():
             raise FileNotFoundError(f"Missing required file: {f.name}")
 
     # -----------------------------
-    # Load monthly returns
+    # Load returns
     # -----------------------------
     returns = pd.read_csv(RETURNS_FILE)
     date_col = find_date_column(returns)
@@ -47,7 +69,7 @@ def main():
         latest_date = "UNKNOWN"
 
     # -----------------------------
-    # Load risk snapshot
+    # Load risk
     # -----------------------------
     risk = pd.read_csv(RISK_FILE)
     latest_risk = risk.iloc[-1]
@@ -56,29 +78,23 @@ def main():
     # Load kill switch
     # -----------------------------
     kill = pd.read_csv(KILL_FILE)
-    kill_date_col = find_date_column(kill)
-
-    if kill_date_col:
-        kill[kill_date_col] = pd.to_datetime(kill[kill_date_col], errors="coerce")
-        kill = kill.sort_values(kill_date_col)
-        latest_kill = kill.iloc[-1]
-    else:
-        latest_kill = kill.iloc[-1]
-
-    # -----------------------------
-    # Decision logic
-    # -----------------------------
+    latest_kill = kill.iloc[-1]
     kill_signal = bool(latest_kill.get("kill_signal", False))
 
+    # -----------------------------
+    # Decision logic (CONFIG DRIVEN)
+    # -----------------------------
     if kill_signal:
-        status = "KILL"
-        exposure = 0.0
-    elif latest_risk.get("vol_3m", 0) > 0.30 or latest_risk.get("max_dd_3m", 0) < -0.35:
-        status = "RISK_OFF"
-        exposure = 0.25
+        status = labels["kill"]
+        exposure = exposure_kill
+
+    elif latest_risk.get("vol_3m", 0) > vol_threshold or latest_risk.get("max_dd_3m", 0) < dd_threshold:
+        status = labels["risk_off"]
+        exposure = exposure_risk_off
+
     else:
-        status = "RISK_ON"
-        exposure = 1.0
+        status = labels["risk_on"]
+        exposure = exposure_risk_on
 
     # -----------------------------
     # Build summary
@@ -92,34 +108,18 @@ def main():
         "max_drawdown_3m": round(float(latest_risk.get("max_dd_3m", 0) or 0), 3),
         "tail_correlation": round(float(latest_risk.get("tail_corr", 0) or 0), 3),
         "kill_signal": kill_signal,
-        "reason": str(latest_kill.get("reason", "OK"))
+        "reason": str(latest_kill.get("reason", "OK")),
+        "profile": active_profile
     }])
 
-    # -----------------------------
-    # Make JSON-safe
-    # -----------------------------
-    summary = summary.replace([float("inf"), float("-inf")], 0)
-    summary = summary.fillna(0)
+    summary = summary.replace([float("inf"), float("-inf")], 0).fillna(0)
 
-    # -----------------------------
-    # Save CSV
-    # -----------------------------
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     summary.to_csv(OUTPUT_FILE, index=False)
 
-    # -----------------------------
-    # Convert to dict
-    # -----------------------------
     result = summary.to_dict(orient="records")[0]
 
-    # -----------------------------
-    # Record to database/logger
-    # -----------------------------
-    try:
-        record(result)
-    except Exception as e:
-        # Do NOT crash the pipeline if database isn't ready
-        print(f"⚠️ Warning: record() failed: {e}")
+    record(result)
 
     print("✅ Mobile summary created successfully")
     print(result)
