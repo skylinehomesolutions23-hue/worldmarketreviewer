@@ -1,22 +1,41 @@
 {
   "active_profile": "balanced",
   "auto_mode": true,
-
   "profiles": {
     "conservative": {
-      "risk_rules": { "volatility_threshold": 0.20, "drawdown_threshold": -0.20 },
-      "exposure_levels": { "risk_on": 0.6, "risk_off": 0.2, "kill": 0.0 }
+      "risk_rules": {
+        "volatility_threshold": 0.2,
+        "drawdown_threshold": -0.2
+      },
+      "exposure_levels": {
+        "risk_on": 0.6,
+        "risk_off": 0.2,
+        "kill": 0.0
+      }
     },
     "balanced": {
-      "risk_rules": { "volatility_threshold": 0.30, "drawdown_threshold": -0.35 },
-      "exposure_levels": { "risk_on": 1.0, "risk_off": 0.25, "kill": 0.0 }
+      "risk_rules": {
+        "volatility_threshold": 0.3,
+        "drawdown_threshold": -0.35
+      },
+      "exposure_levels": {
+        "risk_on": 1.0,
+        "risk_off": 0.25,
+        "kill": 0.0
+      }
     },
     "aggressive": {
-      "risk_rules": { "volatility_threshold": 0.45, "drawdown_threshold": -0.50 },
-      "exposure_levels": { "risk_on": 1.25, "risk_off": 0.5, "kill": 0.0 }
+      "risk_rules": {
+        "volatility_threshold": 0.45,
+        "drawdown_threshold": -0.5
+      },
+      "exposure_levels": {
+        "risk_on": 1.25,
+        "risk_off": 0.5,
+        "kill": 0.0
+      }
     }
   },
-
   "labels": {
     "risk_on": "RISK_ON",
     "risk_off": "RISK_OFF",

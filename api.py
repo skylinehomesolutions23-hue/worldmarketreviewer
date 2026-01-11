@@ -1,3 +1,5 @@
+# api.py
+
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pathlib import Path
@@ -6,6 +8,7 @@ from build_mobile_summary import main
 from tracker import get_recent
 from profile_manager import set_active_profile, load_config
 from scheduler import start as start_scheduler
+from database import init_db
 
 app = FastAPI()
 
@@ -15,6 +18,7 @@ DASHBOARD_FILE = BASE_DIR / "dashboard.html"
 
 @app.on_event("startup")
 def startup_event():
+    init_db()
     start_scheduler()
 
 

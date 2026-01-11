@@ -1,7 +1,11 @@
+# build_mobile_summary.py
+
 import pandas as pd
 import json
 from pathlib import Path
+
 from tracker import record
+from database import save_summary
 
 # -----------------------------
 # Paths
@@ -63,7 +67,7 @@ def main():
         returns[date_col] = pd.to_datetime(returns[date_col], errors="coerce")
         returns = returns.sort_values(date_col)
         latest_returns = returns.iloc[-1]
-        latest_date = latest_returns[date_col]
+        latest_date = str(latest_returns[date_col])
     else:
         latest_returns = returns.iloc[-1]
         latest_date = "UNKNOWN"
@@ -82,7 +86,7 @@ def main():
     kill_signal = bool(latest_kill.get("kill_signal", False))
 
     # -----------------------------
-    # Decision logic (CONFIG DRIVEN)
+    # Decision logic
     # -----------------------------
     if kill_signal:
         status = labels["kill"]
@@ -99,8 +103,8 @@ def main():
     # -----------------------------
     # Build summary
     # -----------------------------
-    summary = pd.DataFrame([{
-        "date": str(latest_date),
+    summary = {
+        "date": latest_date,
         "status": status,
         "recommended_exposure": float(exposure),
         "rolling_net_return": round(float(latest_returns.get("rolling_net_return", 0) or 0), 4),
@@ -110,21 +114,29 @@ def main():
         "kill_signal": kill_signal,
         "reason": str(latest_kill.get("reason", "OK")),
         "profile": active_profile
-    }])
+    }
 
-    summary = summary.replace([float("inf"), float("-inf")], 0).fillna(0)
+    # Clean invalid values
+    for k, v in summary.items():
+        if isinstance(v, float) and (pd.isna(v) or v in [float("inf"), float("-inf")]):
+            summary[k] = 0.0
 
+    # -----------------------------
+    # Save outputs
+    # -----------------------------
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    summary.to_csv(OUTPUT_FILE, index=False)
+    pd.DataFrame([summary]).to_csv(OUTPUT_FILE, index=False)
 
-    result = summary.to_dict(orient="records")[0]
+    # Save to database (NEW)
+    save_summary(summary)
 
-    record(result)
+    # Save to history (existing behavior)
+    record(summary)
 
     print("✅ Mobile summary created successfully")
-    print(result)
+    print(summary)
 
-    return result
+    return summary
 
 
 if __name__ == "__main__":

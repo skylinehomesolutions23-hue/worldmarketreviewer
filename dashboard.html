@@ -6,63 +6,183 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <style>
-body { font-family: Arial; background:#0f172a; color:white; padding:15px }
-.card { background:#1e293b; padding:15px; border-radius:12px; margin-bottom:12px }
-.big { font-size:22px; font-weight:bold }
-.green { color:#4ade80 }
-.yellow { color:#facc15 }
-.red { color:#f87171 }
-small { opacity:0.7 }
+body {
+  font-family: Arial;
+  background: #0f172a;
+  color: white;
+  padding: 16px;
+}
+
+h1 {
+  margin-bottom: 6px;
+}
+
+.subtitle {
+  opacity: 0.6;
+  font-size: 14px;
+  margin-bottom: 14px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.card {
+  background: #1e293b;
+  padding: 16px;
+  border-radius: 14px;
+}
+
+.status {
+  font-size: 26px;
+  font-weight: bold;
+}
+
+.risk-on { color: #22c55e; }
+.risk-off { color: #ef4444; }
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  margin: 6px 0;
+}
+
+.bar-container {
+  background: #334155;
+  border-radius: 10px;
+  overflow: hidden;
+  height: 16px;
+}
+
+.bar-fill {
+  background: #3b82f6;
+  height: 100%;
+  width: 0%;
+  transition: width 0.5s;
+}
+
+button {
+  padding: 10px;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  color: white;
+  font-weight: bold;
+}
+
+.green { background:#16a34a }
+.blue { background:#2563eb }
+.orange { background:#f97316 }
+
+button:hover { opacity: 0.85; }
+
+.footer {
+  opacity: 0.5;
+  font-size: 12px;
+  text-align: center;
+}
 </style>
 </head>
+
 <body>
 
-<h2>📈 WorldMarketReviewer</h2>
+<h1>📈 WorldMarketReviewer</h1>
+<div class="subtitle" id="updated">Last updated: —</div>
 
-<div class="card">
-  <div>Status: <span id="status" class="big">Loading...</span></div>
-  <div>Exposure: <span id="exposure"></span></div>
-  <div>Volatility (3m): <span id="vol"></span></div>
-  <div>Drawdown (3m): <span id="dd"></span></div>
-  <div>Tail Corr: <span id="tail"></span></div>
-  <div><small id="reason"></small></div>
+<div class="grid">
+
+  <div class="card">
+    <div id="status" class="status">Loading...</div>
+    <div id="reason" style="opacity:0.8;margin-top:4px;">—</div>
+  </div>
+
+  <div class="card">
+    <strong>Exposure</strong>
+    <div class="bar-container" style="margin-top:8px;">
+      <div id="exposure-bar" class="bar-fill"></div>
+    </div>
+    <div id="exposure-text" style="margin-top:6px;">0%</div>
+  </div>
+
+  <div class="card">
+    <strong>Active Profile:</strong>
+    <span id="profile">Loading...</span>
+  </div>
+
+  <div class="card">
+    <button class="green" onclick="setProfile('conservative')">Conservative</button>
+    <button class="blue" onclick="setProfile('balanced')">Balanced</button>
+    <button class="orange" onclick="setProfile('aggressive')">Aggressive</button>
+  </div>
+
+  <div class="card">
+    <strong>Key Metrics</strong>
+    <div class="metric-row"><span>Volatility (3m)</span><span id="vol">—</span></div>
+    <div class="metric-row"><span>Max Drawdown (3m)</span><span id="dd">—</span></div>
+    <div class="metric-row"><span>Tail Correlation</span><span id="tail">—</span></div>
+    <div class="metric-row"><span>Kill Signal</span><span id="kill">—</span></div>
+  </div>
+
+  <div class="card">
+    <strong>Exposure History</strong>
+    <canvas id="chart" style="margin-top:10px;"></canvas>
+  </div>
+
 </div>
 
-<div class="card">
-  <canvas id="chart"></canvas>
-</div>
+<div class="footer">Auto-refreshes every 60 seconds</div>
 
 <script>
-let chart;
+let chartInstance = null;
 
-async function load() {
+function formatPct(value) {
+  return (value * 100).toFixed(1) + "%";
+}
+
+function formatNum(value) {
+  return Number(value).toFixed(3);
+}
+
+async function loadAll() {
   try {
-    // --- Summary ---
     const summary = await fetch("/api/summary").then(r => r.json());
-
-    const statusEl = document.getElementById("status");
-    statusEl.innerText = summary.status;
-
-    statusEl.className = "big " +
-      (summary.status === "RISK_ON" ? "green" :
-       summary.status === "RISK_OFF" ? "yellow" :
-       "red");
-
-    document.getElementById("exposure").innerText = summary.recommended_exposure;
-    document.getElementById("vol").innerText = summary.vol_3m;
-    document.getElementById("dd").innerText = summary.max_drawdown_3m;
-    document.getElementById("tail").innerText = summary.tail_correlation;
-    document.getElementById("reason").innerText = summary.reason;
-
-    // --- History Chart ---
+    const config = await fetch("/api/config").then(r => r.json());
     const hist = await fetch("/api/history").then(r => r.json());
 
-    const labels = hist.map(h => h.timestamp.slice(0,10));
-    const exp = hist.map(h => h.exposure);
+    // Timestamp
+    document.getElementById("updated").innerText =
+      "Last updated: " + new Date().toLocaleTimeString();
 
-    if (chart) chart.destroy();
+    // Status
+    const statusEl = document.getElementById("status");
+    statusEl.innerText = summary.status;
+    statusEl.className = "status " + (summary.status === "RISK_ON" ? "risk-on" : "risk-off");
 
-    chart = new Chart(document.getElementById("chart"), {
+    document.getElementById("reason").innerText = summary.reason;
+
+    // Exposure
+    const pct = Math.round(summary.recommended_exposure * 100);
+    document.getElementById("exposure-bar").style.width = pct + "%";
+    document.getElementById("exposure-text").innerText = pct + "%";
+
+    // Profile
+    document.getElementById("profile").innerText = config.active_profile;
+
+    // Metrics
+    document.getElementById("vol").innerText = formatNum(summary.vol_3m);
+    document.getElementById("dd").innerText = formatNum(summary.max_drawdown_3m);
+    document.getElementById("tail").innerText = formatNum(summary.tail_correlation);
+    document.getElementById("kill").innerText = summary.kill_signal ? "YES" : "NO";
+
+    // Chart
+    const labels = hist.map(h => h.timestamp.slice(0, 10)).reverse();
+    const exp = hist.map(h => h.exposure).reverse();
+
+    if (chartInstance) chartInstance.destroy();
+
+    chartInstance = new Chart(document.getElementById("chart"), {
       type: "line",
       data: {
         labels,
@@ -72,25 +192,19 @@ async function load() {
           borderWidth: 2,
           tension: 0.3
         }]
-      },
-      options: {
-        plugins: { legend: { display: false } },
-        scales: {
-          y: { min: 0, max: 1 }
-        }
       }
     });
 
   } catch (err) {
-    console.error("Dashboard error:", err);
+    console.error("Dashboard load failed:", err);
   }
 }
 
-// Initial load
-load();
+// Auto refresh every 60 seconds
+setInterval(loadAll, 60000);
 
-// Auto refresh every 30 seconds
-setInterval(load, 30000);
+// Initial load
+loadAll();
 </script>
 
 </body>
