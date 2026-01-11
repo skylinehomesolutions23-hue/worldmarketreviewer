@@ -1,24 +1,22 @@
-# scheduler.py
-
+import threading
 import time
 from build_mobile_summary import main
-from tracker import record
 from logger import log
-from settings import RUN_EVERY_SECONDS
+
+INTERVAL_SECONDS = 60 * 30  # every 30 minutes
 
 
-def run_forever():
+def loop():
     log("Scheduler started")
-
     while True:
         try:
-            summary = main()
-            record(summary)
+            log("Scheduler running build_mobile_summary()")
+            main()
         except Exception as e:
             log(f"Scheduler error: {e}")
+        time.sleep(INTERVAL_SECONDS)
 
-        time.sleep(RUN_EVERY_SECONDS)
 
-
-if __name__ == "__main__":
-    run_forever()
+def start():
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()

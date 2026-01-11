@@ -1,3 +1,5 @@
+# tracker.py
+
 import datetime
 from database import insert_row, fetch_recent
 from logger import log
@@ -17,5 +19,5 @@ def record(summary: dict):
     log(f"Recorded snapshot: {summary['status']} exposure={summary['recommended_exposure']}")
 
 
-def get_history(limit=200):
+def get_recent(limit=200):
     return fetch_recent(limit)
