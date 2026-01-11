@@ -17,8 +17,5 @@ def record(summary: dict):
     log(f"Recorded snapshot: {summary['status']} exposure={summary['recommended_exposure']}")
 
 
-def get_history(limit: int = 200):
-    """
-    Used by API endpoint /api/history
-    """
+def get_history(limit=200):
     return fetch_recent(limit)

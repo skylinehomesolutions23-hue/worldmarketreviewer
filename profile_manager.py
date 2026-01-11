@@ -3,33 +3,27 @@ from pathlib import Path
 
 CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
 
+
 def load_config():
+    if not CONFIG_FILE.exists():
+        raise FileNotFoundError("config.json not found")
+
     with open(CONFIG_FILE, "r") as f:
         return json.load(f)
 
-def save_config(cfg):
+
+def save_config(config: dict):
     with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=2)
+        json.dump(config, f, indent=2)
 
-def set_profile(profile_name):
-    cfg = load_config()
-    if profile_name not in cfg["profiles"]:
-        raise ValueError("Invalid profile")
-    cfg["active_profile"] = profile_name
-    cfg["auto_mode"] = False
-    save_config(cfg)
-    return cfg
 
-def auto_select_profile(vol, drawdown):
-    cfg = load_config()
+def set_active_profile(profile_name: str):
+    config = load_config()
 
-    if vol < 0.2 and drawdown > -0.15:
-        selected = "aggressive"
-    elif vol < 0.35:
-        selected = "balanced"
-    else:
-        selected = "conservative"
+    if profile_name not in config["profiles"]:
+        return {"status": "error", "message": f"Profile '{profile_name}' not found"}
 
-    cfg["active_profile"] = selected
-    save_config(cfg)
-    return selected
+    config["active_profile"] = profile_name
+    save_config(config)
+
+    return {"status": "ok", "active_profile": profile_name}
