@@ -2,7 +2,6 @@
 import os
 import uvicorn
 
-# Render provides PORT; locally default to 8000
 PORT = int(os.getenv("PORT", "8000"))
 
 if __name__ == "__main__":

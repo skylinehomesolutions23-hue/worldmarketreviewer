@@ -4,38 +4,17 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from pydantic import BaseModel
 
+from main_autobatch import TICKERS
 from data_loader import load_stock_data
 from feature_engineering import build_features
 from walk_forward import walk_forward_predict_proba
 
 from db import init_db, insert_predictions, get_latest_predictions
-from health import check as health_check
-
-
-# ---------- tickers (prefer tickers.py; fallback to main_autobatch.py) ----------
-try:
-    # recommended: keep tickers in a pure constants file
-    from tickers import TICKERS  # type: ignore
-except Exception:
-    # fallback if you still keep them in main_autobatch.py
-    from main_autobatch import TICKERS  # type: ignore
-
 
 app = FastAPI(title="WorldMarketReviewer API")
-
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-
-class HeadToGetMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        if request.method == "HEAD":
-            request.scope["method"] = "GET"
-        return await call_next(request)
-
-app.add_middleware(HeadToGetMiddleware)
 
 
 # ---------------- helpers ----------------
@@ -108,14 +87,26 @@ def root():
     return {"message": "WorldMarketReviewer API is running", "tickers_count": len(TICKERS)}
 
 
+@app.head("/")
+def root_head():
+    # Render/monitors may send HEAD requests
+    return Response(status_code=200)
+
+
 @app.get("/health")
 def health():
-    return health_check()
+    return {
+        "status": "ok",
+        "service": "worldmarketreviewer",
+        "version": "0.1.0",
+        "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
 
 
-@app.get("/api/health")
-def api_health():
-    return health_check()
+@app.head("/api/summary")
+def summary_head():
+    # IMPORTANT: do NOT rewrite HEAD->GET; just return empty body safely
+    return Response(status_code=200)
 
 
 @app.post("/api/run_phase2")
@@ -160,19 +151,14 @@ def run_phase2(req: PredictRequest):
     if results:
         insert_predictions(run_id, results)
 
-    return {
-        "run_id": run_id,
-        "requested": len(tickers),
-        "stored": len(results),
-        "errors": errors,
-    }
+    return {"run_id": run_id, "requested": len(tickers), "stored": len(results), "errors": errors}
 
 
 @app.get("/api/summary")
 def summary(limit: int = 50):
     """
     Return latest predictions (JSON-safe).
-    If empty, return an empty list + a hint that the client should call /api/run_phase2.
+    If DB empty, return empty list (client can prompt user to run batch).
     """
     preds = get_latest_predictions(limit=limit)
 
@@ -192,5 +178,5 @@ def summary(limit: int = 50):
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "system_status": "OK",
         "predictions": out,
-        "note": None if out else "No predictions yet. POST to /api/run_phase2 to generate.",
+        "note": None if out else "No predictions yet. POST to /api/run_phase2",
     }
