@@ -10,9 +10,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, "app.db")
 
-
 def _connect():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -93,3 +92,19 @@ def get_latest_run_id() -> Optional[str]:
     row = cur.fetchone()
     conn.close()
     return row["run_id"] if row else None
+
+
+def get_predictions_for_run(run_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    conn = _connect()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT * FROM predictions
+    WHERE run_id = ?
+    ORDER BY id DESC
+    LIMIT ?
+    """, (run_id, limit))
+
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows

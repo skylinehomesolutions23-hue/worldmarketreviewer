@@ -4,7 +4,8 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from main_autobatch import TICKERS
@@ -12,7 +13,12 @@ from data_loader import load_stock_data
 from feature_engineering import build_features
 from walk_forward import walk_forward_predict_proba
 
-from db import init_db, insert_predictions, get_latest_predictions
+from db import (
+    init_db,
+    insert_predictions,
+    get_latest_run_id,
+    get_predictions_for_run,
+)
 
 app = FastAPI(title="WorldMarketReviewer API")
 
@@ -87,12 +93,6 @@ def root():
     return {"message": "WorldMarketReviewer API is running", "tickers_count": len(TICKERS)}
 
 
-@app.head("/")
-def root_head():
-    # Render/monitors may send HEAD requests
-    return Response(status_code=200)
-
-
 @app.get("/health")
 def health():
     return {
@@ -103,9 +103,9 @@ def health():
     }
 
 
+# Avoid any weird HEAD behavior on Render / proxies
 @app.head("/api/summary")
 def summary_head():
-    # IMPORTANT: do NOT rewrite HEAD->GET; just return empty body safely
     return Response(status_code=200)
 
 
@@ -155,12 +155,25 @@ def run_phase2(req: PredictRequest):
 
 
 @app.get("/api/summary")
-def summary(limit: int = 50):
+def summary(limit: int = 50, run_id: Optional[str] = None):
     """
-    Return latest predictions (JSON-safe).
-    If DB empty, return empty list (client can prompt user to run batch).
+    Latest-run summary (clean phone output).
+
+    - Default: returns ONLY the latest run's rows
+    - Optional: pass run_id=... to view a specific run
     """
-    preds = get_latest_predictions(limit=limit)
+    if run_id is None:
+        run_id = get_latest_run_id()
+
+    if not run_id:
+        return {
+            "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "system_status": "OK",
+            "predictions": [],
+            "note": "No predictions yet. POST to /api/run_phase2 first.",
+        }
+
+    preds = get_predictions_for_run(run_id, limit=max(1, int(limit)))
 
     out = []
     for p in preds:
@@ -178,5 +191,5 @@ def summary(limit: int = 50):
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "system_status": "OK",
         "predictions": out,
-        "note": None if out else "No predictions yet. POST to /api/run_phase2",
+        "note": None,
     }
