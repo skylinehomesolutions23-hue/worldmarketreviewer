@@ -1,4 +1,3 @@
-# api.py
 import math
 from datetime import datetime
 from typing import List, Optional, Dict, Any
@@ -18,14 +17,18 @@ from db import (
     insert_predictions,
     get_latest_run_id,
     get_predictions_for_run,
+    create_run,
+    update_run_progress,
+    finish_run,
+    get_run_state,
 )
 
 app = FastAPI(title="WorldMarketReviewer API")
 
 
 # ---------------- helpers ----------------
+
 def json_safe(x):
-    """Convert NaN/Inf and weird values into JSON-safe primitives."""
     if x is None:
         return None
     try:
@@ -37,17 +40,11 @@ def json_safe(x):
 
 
 def compute_expected_return_from_prob(prob_up: float, base_move: float = 0.02) -> float:
-    """
-    Simple expected return proxy:
-    exp_return ≈ (2*prob_up - 1) * base_move
-    base_move default 2% weekly move proxy.
-    """
     prob_up = max(0.0, min(1.0, float(prob_up)))
     return (2.0 * prob_up - 1.0) * float(base_move)
 
 
 def _run_one_ticker(ticker: str, horizon_days: int, base_weekly_move: float) -> Dict[str, Any]:
-    """Compute prediction for one ticker and return a row dict for DB insert."""
     t = ticker.upper().strip()
 
     df = load_stock_data(t)
@@ -57,10 +54,14 @@ def _run_one_ticker(ticker: str, horizon_days: int, base_weekly_move: float) -> 
     df = build_features(df)
     feature_cols = [c for c in df.columns if c not in ["target", "date"]]
 
-    probs = walk_forward_predict_proba(df, feature_cols=feature_cols, target_col="target")
-    prob_up = float(probs.iloc[-1])
+    probs = walk_forward_predict_proba(
+        df,
+        feature_cols=feature_cols,
+        target_col="target"
+    )
 
-    exp_return = compute_expected_return_from_prob(prob_up, base_move=base_weekly_move)
+    prob_up = float(probs.iloc[-1])
+    exp_return = compute_expected_return_from_prob(prob_up, base_weekly_move)
     direction = "UP" if prob_up >= 0.5 else "DOWN"
 
     return {
@@ -73,6 +74,7 @@ def _run_one_ticker(ticker: str, horizon_days: int, base_weekly_move: float) -> 
 
 
 # ---------------- request models ----------------
+
 class PredictRequest(BaseModel):
     tickers: Optional[List[str]] = None
     all: bool = False
@@ -82,15 +84,17 @@ class PredictRequest(BaseModel):
 
 
 # ---------------- startup ----------------
+
 @app.on_event("startup")
-def _startup():
+def startup():
     init_db()
 
 
 # ---------------- routes ----------------
+
 @app.get("/")
 def root():
-    return {"message": "WorldMarketReviewer API is running", "tickers_count": len(TICKERS)}
+    return {"message": "WorldMarketReviewer API is running"}
 
 
 @app.get("/health")
@@ -98,12 +102,11 @@ def health():
     return {
         "status": "ok",
         "service": "worldmarketreviewer",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
 
 
-# Avoid any weird HEAD behavior on Render / proxies
 @app.head("/api/summary")
 def summary_head():
     return Response(status_code=200)
@@ -111,10 +114,6 @@ def summary_head():
 
 @app.post("/api/run_phase2")
 def run_phase2(req: PredictRequest):
-    """
-    Run predictions and store in SQLite.
-    Use max_parallel > 1 to run tickers concurrently.
-    """
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
     if req.all or not req.tickers:
@@ -122,74 +121,95 @@ def run_phase2(req: PredictRequest):
     else:
         tickers = [t.upper().strip() for t in req.tickers if t and t.strip()]
 
-    max_parallel = max(1, int(req.max_parallel))
     horizon_days = int(req.horizon_days)
     base_weekly_move = float(req.base_weekly_move)
+    max_parallel = max(1, int(req.max_parallel))
 
+    create_run(run_id, total=len(tickers))
+
+    completed = 0
     results: List[Dict[str, Any]] = []
-    errors: Dict[str, str] = {}
 
     if max_parallel == 1:
         for t in tickers:
             try:
                 results.append(_run_one_ticker(t, horizon_days, base_weekly_move))
-            except Exception as e:
-                errors[t] = str(e)
+                completed += 1
+                update_run_progress(run_id, completed)
+            except Exception:
+                completed += 1
+                update_run_progress(run_id, completed)
     else:
         with ThreadPoolExecutor(max_workers=max_parallel) as ex:
-            future_map = {
+            futures = {
                 ex.submit(_run_one_ticker, t, horizon_days, base_weekly_move): t
                 for t in tickers
             }
-            for fut in as_completed(future_map):
-                t = future_map[fut]
+            for fut in as_completed(futures):
                 try:
                     results.append(fut.result())
-                except Exception as e:
-                    errors[t] = str(e)
+                except Exception:
+                    pass
+                completed += 1
+                update_run_progress(run_id, completed)
 
     if results:
         insert_predictions(run_id, results)
 
-    return {"run_id": run_id, "requested": len(tickers), "stored": len(results), "errors": errors}
+    finish_run(run_id)
+
+    return {
+        "run_id": run_id,
+        "status": "started",
+        "total": len(tickers)
+    }
+
+
+@app.get("/api/run_phase2/status")
+def run_status(run_id: str):
+    state = get_run_state(run_id)
+    if not state:
+        return {"error": "run_id not found"}
+
+    return {
+        "run_id": run_id,
+        "status": state["status"],
+        "progress": {
+            "completed": state["completed"],
+            "total": state["total"],
+            "pct": round(100 * state["completed"] / max(1, state["total"]), 1),
+        },
+        "started_at": state["started_at"],
+        "finished_at": state["finished_at"],
+    }
 
 
 @app.get("/api/summary")
 def summary(limit: int = 50, run_id: Optional[str] = None):
-    """
-    Latest-run summary (clean phone output).
-
-    - Default: returns ONLY the latest run's rows
-    - Optional: pass run_id=... to view a specific run
-    """
     if run_id is None:
         run_id = get_latest_run_id()
 
     if not run_id:
         return {
             "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "system_status": "OK",
             "predictions": [],
             "note": "No predictions yet. POST to /api/run_phase2 first.",
         }
 
     preds = get_predictions_for_run(run_id, limit=max(1, int(limit)))
 
-    out = []
-    for p in preds:
-        out.append({
-            "ticker": p.get("ticker"),
-            "prob_up": json_safe(p.get("prob_up")),
-            "exp_return": json_safe(p.get("exp_return")),
-            "direction": p.get("direction"),
-            "generated_at": p.get("generated_at"),
-            "run_id": p.get("run_id"),
-            "horizon_days": p.get("horizon_days"),
-        })
-
     return {
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "system_status": "OK",
-        "predictions": out,
-        "note": None,
+        "run_id": run_id,
+        "predictions": [
+            {
+                "ticker": p["ticker"],
+                "prob_up": json_safe(p["prob_up"]),
+                "exp_return": json_safe(p["exp_return"]),
+                "direction": p["direction"],
+                "generated_at": p["generated_at"],
+                "horizon_days": p["horizon_days"],
+            }
+            for p in preds
+        ],
     }
