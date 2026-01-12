@@ -1,3 +1,4 @@
+# main_autobatch.py
 import os
 import time
 import pandas as pd
@@ -6,86 +7,78 @@ from data_loader import load_stock_data
 from feature_engineering import build_features
 from walk_forward import walk_forward_predict_proba
 
-# -----------------------------
-# UNIVERSE
-# -----------------------------
-CORE_TICKERS = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META",
-    "TSLA", "NVDA", "NFLX", "AMD", "INTC",
-    "JPM", "BAC", "GS", "MS", "XOM",
-    "CVX", "SPY", "QQQ", "DIA"
+# ✅ Default ticker list (safe for other modules to import)
+TICKERS = [
+    "AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","JPM","BAC","GS",
+    "MS","XOM","CVX","SPY","QQQ","DIA","ORCL","IBM","CRM","ADBE","WMT",
+    "COST","HD","PFE","JNJ","UNH","BA","CAT","GE","XLK","XLF","XLE",
+    "XLV","XLI","XLY","XLP","XLU"
 ]
 
-LIQUID_STOCKS = [
-    "ORCL", "IBM", "CRM", "ADBE",
-    "WMT", "COST", "HD",
-    "PFE", "JNJ", "UNH",
-    "BA", "CAT", "GE"
-]
-
-SECTOR_ETFS = [
-    "XLK", "XLF", "XLE", "XLV",
-    "XLI", "XLY", "XLP", "XLU"
-]
-
-# 🔑 FINAL UNIVERSE (order preserved, no duplicates)
-TICKERS = list(dict.fromkeys(
-    CORE_TICKERS + LIQUID_STOCKS + SECTOR_ETFS
-))
-
-# -----------------------------
-# FILES
-# -----------------------------
-RESULTS_DIR = "results"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RESULTS_DIR = os.path.join(BASE_DIR, "results")
 RESULTS_FILE = os.path.join(RESULTS_DIR, "predictions.csv")
-os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# -----------------------------
-# RESUME LOGIC
-# -----------------------------
-if os.path.exists(RESULTS_FILE):
-    results_df = pd.read_csv(RESULTS_FILE)
-    completed = set(results_df["ticker"])
-else:
-    results_df = pd.DataFrame(columns=["ticker", "prob_up"])
-    completed = set()
 
-print("\n=== 🚀 AUTO-BATCH STOCK RANKER STARTED ===\n")
+def main():
+    os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# -----------------------------
-# MAIN LOOP
-# -----------------------------
-for i, ticker in enumerate(TICKERS, start=1):
-    if ticker in completed:
-        print(f"[SKIP] {ticker} already processed")
-        continue
+    # Load existing results if present
+    if os.path.exists(RESULTS_FILE) and os.path.getsize(RESULTS_FILE) > 10:
+        results_df = pd.read_csv(RESULTS_FILE)
+        if "ticker" in results_df.columns:
+            completed = set(results_df["ticker"].astype(str).str.upper().str.strip())
+        else:
+            completed = set()
+    else:
+        results_df = pd.DataFrame(columns=["ticker", "prob_up", "direction", "asof"])
+        completed = set()
 
-    print(f"[{i}/{len(TICKERS)}] Running model for: {ticker}")
+    print("\n=== PHASE 2: BASELINE AUTO-BATCH STARTED ===\n")
 
-    try:
-        df = load_stock_data(ticker)
-        df = build_features(df)
+    for i, ticker in enumerate(TICKERS, start=1):
+        t = ticker.upper().strip()
+        if t in completed:
+            print(f"[SKIP] {t} already processed")
+            continue
 
-        feature_cols = [c for c in df.columns if c != "target"]
+        print(f"[{i}/{len(TICKERS)}] Running model for: {t}")
 
-        probs = walk_forward_predict_proba(
-            df,
-            feature_cols=feature_cols,
-            target_col="target",
-        )
+        try:
+            df = load_stock_data(t)
+            if df is None or len(df) < 10:
+                raise ValueError(f"Not enough data for {t}")
 
-        prob_up = float(probs.iloc[-1])
-        direction = "UP" if prob_up >= 0.5 else "DOWN"
+            df = build_features(df)
+            feature_cols = [c for c in df.columns if c not in ["target", "date"]]
 
-        print(f"✔ {ticker}: {direction} ({prob_up:.2%})")
+            probs = walk_forward_predict_proba(df, feature_cols=feature_cols, target_col="target")
+            prob_up = float(probs.iloc[-1])
+            direction = "UP" if prob_up >= 0.5 else "DOWN"
 
-        results_df.loc[len(results_df)] = [ticker, prob_up]
-        results_df.to_csv(RESULTS_FILE, index=False)
+            print(f"✔ {t}: {direction} ({prob_up:.2%})")
 
-        # CPU cooldown
-        time.sleep(1)
+            row = {
+                "ticker": t,
+                "prob_up": prob_up,
+                "direction": direction,
+                "asof": pd.Timestamp.utcnow().isoformat()
+            }
 
-    except Exception as e:
-        print(f"❌ {ticker} failed: {e}")
+            # Ensure columns exist
+            for col in row.keys():
+                if col not in results_df.columns:
+                    results_df[col] = None
 
-print("\n=== ✅ ALL TICKERS COMPLETE ===")
+            results_df.loc[len(results_df)] = row
+            results_df.to_csv(RESULTS_FILE, index=False)
+            time.sleep(0.2)
+
+        except Exception as e:
+            print(f"❌ {t} failed: {e}")
+
+    print("\n=== COMPLETE ===")
+
+
+if __name__ == "__main__":
+    main()
