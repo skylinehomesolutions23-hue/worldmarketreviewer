@@ -4,4 +4,4 @@ pandas
 fastapi
 uvicorn
 requests
-requests
+scikit-learn
