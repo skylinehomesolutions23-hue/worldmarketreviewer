@@ -26,6 +26,17 @@ except Exception:
 
 app = FastAPI(title="WorldMarketReviewer API")
 
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+class HeadToGetMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method == "HEAD":
+            request.scope["method"] = "GET"
+        return await call_next(request)
+
+app.add_middleware(HeadToGetMiddleware)
+
 
 # ---------------- helpers ----------------
 def json_safe(x):
