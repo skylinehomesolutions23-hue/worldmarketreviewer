@@ -1,7 +1,5 @@
-flask
-flask-cors
-pandas
 fastapi
 uvicorn
+pandas
 requests
 scikit-learn

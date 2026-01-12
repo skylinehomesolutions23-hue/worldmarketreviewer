@@ -7,14 +7,22 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-# ✅ IMPORTANT: use your existing ticker list
-from main_autobatch import TICKERS
-
 from data_loader import load_stock_data
 from feature_engineering import build_features
 from walk_forward import walk_forward_predict_proba
 
 from db import init_db, insert_predictions, get_latest_predictions
+from health import check as health_check
+
+
+# ---------- tickers (prefer tickers.py; fallback to main_autobatch.py) ----------
+try:
+    # recommended: keep tickers in a pure constants file
+    from tickers import TICKERS  # type: ignore
+except Exception:
+    # fallback if you still keep them in main_autobatch.py
+    from main_autobatch import TICKERS  # type: ignore
+
 
 app = FastAPI(title="WorldMarketReviewer API")
 
@@ -89,6 +97,16 @@ def root():
     return {"message": "WorldMarketReviewer API is running", "tickers_count": len(TICKERS)}
 
 
+@app.get("/health")
+def health():
+    return health_check()
+
+
+@app.get("/api/health")
+def api_health():
+    return health_check()
+
+
 @app.post("/api/run_phase2")
 def run_phase2(req: PredictRequest):
     """
@@ -131,31 +149,21 @@ def run_phase2(req: PredictRequest):
     if results:
         insert_predictions(run_id, results)
 
-    return {"run_id": run_id, "requested": len(tickers), "stored": len(results), "errors": errors}
+    return {
+        "run_id": run_id,
+        "requested": len(tickers),
+        "stored": len(results),
+        "errors": errors,
+    }
 
 
 @app.get("/api/summary")
 def summary(limit: int = 50):
     """
-    Return latest predictions. If DB is empty, auto-generate a small seed batch
-    so mobile never sees empty predictions.
+    Return latest predictions (JSON-safe).
+    If empty, return an empty list + a hint that the client should call /api/run_phase2.
     """
     preds = get_latest_predictions(limit=limit)
-
-    if not preds:
-        seed = ["SPY", "QQQ", "AMZN"]
-        run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-
-        seed_results: List[Dict[str, Any]] = []
-        for t in seed:
-            try:
-                seed_results.append(_run_one_ticker(t, 5, 0.02))
-            except Exception:
-                pass
-
-        if seed_results:
-            insert_predictions(run_id, seed_results)
-            preds = get_latest_predictions(limit=limit)
 
     out = []
     for p in preds:
@@ -173,4 +181,5 @@ def summary(limit: int = 50):
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "system_status": "OK",
         "predictions": out,
+        "note": None if out else "No predictions yet. POST to /api/run_phase2 to generate.",
     }
