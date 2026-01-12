@@ -5,44 +5,35 @@ __pycache__/
 *.pyd
 .venv/
 venv/
-env/
+.env
 
-# IDE
+# OS / IDE
+.DS_Store
 .idea/
 .vscode/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Node / Mobile
-mobile/node_modules/
-node_modules/
-
-# Android
-mobile/android/.gradle/
-mobile/android/build/
-mobile/android/app/build/
 
 # Logs
 *.log
 
-# Outputs / temp
-outputs/
+# App settings / state
+app_settings.json
+phase2_state.json
+state.db
+data.db
+history.db
+
+# Output folders
 results/
+outputs/
+cache/
+backup_csv/
+runs/
 
-# --- Runtime / generated files ---
-data/
-*.db
-*.csv
-
-# --- Python cache ---
-__pycache__/
-*.pyc
-
-# --- Virtual environment ---
-.venv/
-
-# --- IDE ---
-.idea/
-.vscode/
+# Data outputs (generated)
+data/*.csv
+data/*.db
+data/results/
+data/backup_csv/
+data/monthly/
+data/latest_summary.json
+data/mobile_summary.csv
