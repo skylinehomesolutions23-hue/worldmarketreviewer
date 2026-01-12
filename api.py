@@ -1,201 +1,131 @@
 # api.py
-import os
-import json
-import uuid
 import math
-import subprocess
 from datetime import datetime
-from typing import List, Optional, Any
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
+
+from tickers import TICKERS
+from data_loader import load_stock_data
+from feature_engineering import build_features
+from walk_forward import walk_forward_predict_proba
+from db import init_db, insert_predictions, get_latest_predictions
 
 app = FastAPI(title="WorldMarketReviewer API")
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DATA_DIR = os.path.join(BASE_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-SUMMARY_JSON = os.path.join(DATA_DIR, "latest_summary.json")
-SUMMARY_CSV = os.path.join(DATA_DIR, "mobile_summary.csv")
-
-BUILD_SUMMARY_SCRIPT = os.path.join(BASE_DIR, "build_mobile_summary.py")
-
-RESULTS_FILE = os.path.join(BASE_DIR, "results", "predictions.csv")
-STATE_FILE = os.path.join(BASE_DIR, "phase2_state.json")
-
-RUNS_DIR = os.path.join(BASE_DIR, "runs")
-os.makedirs(RUNS_DIR, exist_ok=True)
-
-
-def sanitize_json(obj: Any) -> Any:
-    if obj is None:
+# ---------- helpers ----------
+def json_safe(x):
+    """Convert NaN/Inf into JSON-safe primitives (FastAPI rejects them)."""
+    if x is None:
         return None
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    if isinstance(obj, (int, bool, str)):
-        return obj
-    if isinstance(obj, (list, tuple)):
-        return [sanitize_json(x) for x in obj]
-    if isinstance(obj, dict):
-        return {str(k): sanitize_json(v) for k, v in obj.items()}
-    return str(obj)
-
-
-def try_build_summary() -> dict:
-    """
-    Attempt to build summary by running build_mobile_summary.py.
-    Returns a dict with debug info (never raises).
-    """
-    debug = {
-        "script_exists": os.path.exists(BUILD_SUMMARY_SCRIPT),
-        "summary_json_exists_before": os.path.exists(SUMMARY_JSON),
-        "summary_csv_exists_before": os.path.exists(SUMMARY_CSV),
-        "cwd": BASE_DIR,
-    }
-
-    if not os.path.exists(BUILD_SUMMARY_SCRIPT):
-        debug["error"] = "build_mobile_summary.py not found in repo"
-        return debug
-
     try:
-        env = os.environ.copy()
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
+        if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
+            return None
+        return x
+    except Exception:
+        return None
 
-        # capture output so we can diagnose Render failures
-        p = subprocess.run(
-            [os.sys.executable, BUILD_SUMMARY_SCRIPT],
-            cwd=BASE_DIR,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        debug["returncode"] = p.returncode
-        debug["output_tail"] = (p.stdout or "")[-1500:]  # last 1500 chars
-    except Exception as e:
-        debug["exception"] = str(e)
 
-    debug["summary_json_exists_after"] = os.path.exists(SUMMARY_JSON)
-    debug["summary_csv_exists_after"] = os.path.exists(SUMMARY_CSV)
-    return debug
+def compute_expected_return_from_prob(prob_up: float, base_move: float = 0.02) -> float:
+    prob_up = max(0.0, min(1.0, float(prob_up)))
+    return (2.0 * prob_up - 1.0) * float(base_move)
+
+
+# ---------- request models ----------
+class PredictRequest(BaseModel):
+    tickers: Optional[List[str]] = None
+    all: bool = False
+    force: bool = True  # reserved for future state logic
+    horizon_days: int = 5
+    base_weekly_move: float = 0.02
+
+
+# ---------- startup ----------
+@app.on_event("startup")
+def _startup():
+    init_db()
+
+
+# ---------- routes ----------
+@app.get("/")
+def root():
+    return {"message": "WorldMarketReviewer API is running", "tickers_count": len(TICKERS)}
+
+
+@app.post("/api/run_phase2")
+def run_phase2(req: PredictRequest):
+    """
+    Runs predictions and stores them in SQLite.
+    Works on Render because data_loader falls back to online price fetch.
+    """
+    run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    if req.all or not req.tickers:
+        tickers = TICKERS
+    else:
+        tickers = [t.upper().strip() for t in req.tickers if t.strip()]
+
+    results: List[Dict[str, Any]] = []
+    errors: Dict[str, str] = {}
+
+    for ticker in tickers:
+        try:
+            df = load_stock_data(ticker)
+            if df is None or len(df) < 10:
+                errors[ticker] = "Not enough data"
+                continue
+
+            df = build_features(df)
+            feature_cols = [c for c in df.columns if c not in ["target", "date"]]
+
+            probs = walk_forward_predict_proba(df, feature_cols=feature_cols, target_col="target")
+            prob_up = float(probs.iloc[-1])
+
+            exp_return = compute_expected_return_from_prob(prob_up, base_move=req.base_weekly_move)
+            direction = "UP" if prob_up >= 0.5 else "DOWN"
+
+            results.append({
+                "ticker": ticker,
+                "prob_up": json_safe(prob_up),
+                "exp_return": json_safe(exp_return),
+                "direction": direction,
+                "horizon_days": int(req.horizon_days),
+            })
+
+        except Exception as e:
+            errors[ticker] = str(e)
+
+    if results:
+        insert_predictions(run_id, results)
+
+    return {
+        "run_id": run_id,
+        "requested": len(tickers),
+        "stored": len(results),
+        "errors": errors,
+    }
 
 
 @app.get("/api/summary")
-def api_summary():
-    # If JSON not present, try generating it
-    if not os.path.exists(SUMMARY_JSON):
-        debug = try_build_summary()
-    else:
-        debug = {"note": "latest_summary.json already exists"}
+def summary(limit: int = 50):
+    preds = get_latest_predictions(limit=limit)
 
-    # Return JSON if present
-    if os.path.exists(SUMMARY_JSON):
-        with open(SUMMARY_JSON, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return sanitize_json(data)
+    out = []
+    for p in preds:
+        out.append({
+            "ticker": p.get("ticker"),
+            "prob_up": json_safe(p.get("prob_up")),
+            "exp_return": json_safe(p.get("exp_return")),
+            "direction": p.get("direction"),
+            "generated_at": p.get("generated_at"),
+            "run_id": p.get("run_id"),
+            "horizon_days": p.get("horizon_days"),
+        })
 
-    # Else return CSV if present
-    if os.path.exists(SUMMARY_CSV):
-        with open(SUMMARY_CSV, "r", encoding="utf-8", errors="replace") as f:
-            return {"format": "csv", "content": f.read()}
-
-    # Else return debug so we can see why Render can't build it
     return {
-        "error": "No summary found",
-        "debug": debug,
-        "expected_json": SUMMARY_JSON,
-        "expected_csv": SUMMARY_CSV,
+        "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "system_status": "OK",
+        "predictions": out,
     }
-
-
-class Phase2RunRequest(BaseModel):
-    mode: str = "all"
-    tickers: Optional[List[str]] = None
-    max_parallel: int = 4
-    force: bool = True
-    sleep: float = 0.0
-
-
-def _run_paths(run_id: str):
-    meta = os.path.join(RUNS_DIR, f"{run_id}.json")
-    log = os.path.join(RUNS_DIR, f"{run_id}.log")
-    return meta, log
-
-
-def _write_meta(run_id: str, data: dict):
-    meta_path, _ = _run_paths(run_id)
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-
-def _read_meta(run_id: str) -> dict:
-    meta_path, _ = _run_paths(run_id)
-    if not os.path.exists(meta_path):
-        raise HTTPException(status_code=404, detail="run_id not found")
-    with open(meta_path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-@app.post("/phase2/run")
-def phase2_run(req: Phase2RunRequest):
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
-    _, log_path = _run_paths(run_id)
-
-    runner = os.path.join(BASE_DIR, "phase2_parallel_runner.py")
-
-    cmd = [
-        os.sys.executable,
-        runner,
-        "--max-parallel", str(max(1, req.max_parallel)),
-        "--sleep", str(req.sleep),
-    ]
-    if req.force:
-        cmd.append("--force")
-
-    if req.mode == "all":
-        cmd.append("--all")
-    elif req.mode == "tickers":
-        if not req.tickers:
-            raise HTTPException(status_code=400, detail="tickers required when mode='tickers'")
-        tickers_str = ",".join([t.upper().strip() for t in req.tickers if t.strip()])
-        cmd += ["--tickers", tickers_str]
-    else:
-        raise HTTPException(status_code=400, detail="mode must be 'all' or 'tickers'")
-
-    _write_meta(run_id, {
-        "run_id": run_id,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "status": "running",
-        "cmd": cmd,
-        "log_path": log_path,
-        "results_file": RESULTS_FILE,
-        "state_file": STATE_FILE,
-    })
-
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
-
-    with open(log_path, "w", encoding="utf-8") as logf:
-        subprocess.Popen(
-            cmd,
-            cwd=BASE_DIR,
-            env=env,
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-
-    return {"run_id": run_id, "status": "running"}
-
-
-@app.get("/")
-def root():
-    return {"message": "WorldMarketReviewer API is running"}
