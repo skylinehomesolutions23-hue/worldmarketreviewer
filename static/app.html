@@ -1,0 +1,131 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>WorldMarketReviewer</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; padding: 16px; }
+    h1 { font-size: 20px; margin: 0 0 8px 0; }
+    .card { border: 1px solid #eee; border-radius: 12px; padding: 12px; margin: 12px 0; }
+    input { width: 100%; padding: 12px; font-size: 16px; border: 1px solid #ddd; border-radius: 10px; }
+    button { width: 100%; padding: 12px; font-size: 16px; border: 0; border-radius: 10px; background: #111827; color: white; font-weight: 600; }
+    .row { display: flex; justify-content: space-between; gap: 8px; }
+    .muted { opacity: 0.7; }
+    .item { padding: 10px 0; border-bottom: 1px solid #f0f0f0; }
+    .item:last-child { border-bottom: 0; }
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; background: #f3f4f6; }
+    .small { font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>WorldMarketReviewer</h1>
+  <div class="muted">Run predictions from your phone. Backend: Render + Supabase.</div>
+
+  <div class="card">
+    <div class="muted" style="margin-bottom:8px;">Tickers (comma-separated)</div>
+    <input id="tickers" value="SPY,QQQ,NVDA" />
+    <div style="height:10px;"></div>
+    <button id="runBtn">Run Predictions</button>
+    <div id="status" class="muted" style="margin-top:10px;"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div><b>Results</b></div>
+      <div id="runPill" class="pill" style="display:none;"></div>
+    </div>
+    <div id="results" class="muted" style="margin-top:10px;">No results yet.</div>
+  </div>
+
+<script>
+  const API = ""; // same origin
+
+  const elTickers = document.getElementById("tickers");
+  const elRunBtn = document.getElementById("runBtn");
+  const elStatus = document.getElementById("status");
+  const elResults = document.getElementById("results");
+  const elRunPill = document.getElementById("runPill");
+
+  function fmtPct(x) {
+    if (typeof x !== "number") return "-";
+    return (x * 100).toFixed(1) + "%";
+  }
+
+  function setStatus(text) {
+    elStatus.textContent = text || "";
+  }
+
+  function setResults(preds) {
+    if (!preds || preds.length === 0) {
+      elResults.textContent = "No results.";
+      return;
+    }
+    elResults.innerHTML = preds.map(p => `
+      <div class="item">
+        <div class="row">
+          <div><b>${p.ticker}</b> <span class="pill">${p.direction}</span></div>
+          <div>${fmtPct(p.prob_up)}</div>
+        </div>
+        <div class="muted small">Expected: ${(p.exp_return ?? 0).toFixed(4)} | Horizon: ${p.horizon_days ?? 5}d</div>
+      </div>
+    `).join("");
+  }
+
+  async function startRun(tickers) {
+    const res = await fetch(`${API}/api/run_phase2`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ tickers, max_parallel: 3 })
+    });
+    return res.json();
+  }
+
+  async function getStatus(runId) {
+    const res = await fetch(`${API}/api/run_phase2/status?run_id=${encodeURIComponent(runId)}`);
+    return res.json();
+  }
+
+  async function getSummary(runId) {
+    const res = await fetch(`${API}/api/summary?run_id=${encodeURIComponent(runId)}`);
+    return res.json();
+  }
+
+  elRunBtn.addEventListener("click", async () => {
+    const tickers = elTickers.value.split(",").map(s => s.trim()).filter(Boolean);
+    if (tickers.length === 0) return;
+
+    elRunBtn.disabled = true;
+    setStatus("Starting run...");
+    setResults([]);
+
+    const started = await startRun(tickers);
+    const runId = started.run_id;
+
+    elRunPill.style.display = "inline-block";
+    elRunPill.textContent = runId;
+
+    setStatus(`Running... 0/${started.total ?? tickers.length}`);
+
+    const poll = setInterval(async () => {
+      const s = await getStatus(runId);
+      if (s.error) {
+        setStatus("Error: " + s.error);
+        clearInterval(poll);
+        elRunBtn.disabled = false;
+        return;
+      }
+      setStatus(`Status: ${s.status} — ${s.progress.completed}/${s.progress.total}`);
+
+      if (s.status === "finished") {
+        clearInterval(poll);
+        const out = await getSummary(runId);
+        setResults(out.predictions || []);
+        setStatus("Finished.");
+        elRunBtn.disabled = false;
+      }
+    }, 1500);
+  });
+</script>
+</body>
+</html>
