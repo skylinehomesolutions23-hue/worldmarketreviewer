@@ -90,6 +90,83 @@ def _run_one_ticker(
     }
 
 
+def _sparkline_from_df(df, n: int) -> Dict[str, Any]:
+    """
+    Convert a price dataframe to sparkline-friendly arrays.
+    Expected columns: ideally 'close' or 'Close'. Index may be datetime-like.
+    """
+    if df is None or df.empty:
+        return {"closes": [], "dates": [], "rows": 0, "source": "unknown"}
+
+    # Find close column
+    close_col = None
+    for c in ["close", "Close", "adj_close", "Adj Close", "adjclose", "AdjClose"]:
+        if c in df.columns:
+            close_col = c
+            break
+
+    if close_col is None:
+        # As a last resort, try first numeric column
+        for c in df.columns:
+            try:
+                # pandas dtype check without importing pandas explicitly
+                sample = df[c].dropna().iloc[:3].tolist()
+                if sample and all(isinstance(v, (int, float)) for v in sample):
+                    close_col = c
+                    break
+            except Exception:
+                continue
+
+    if close_col is None:
+        return {
+            "closes": [],
+            "dates": [],
+            "rows": int(len(df)),
+            "source": df.attrs.get("source", "unknown"),
+            "note": "No close-like column found.",
+        }
+
+    tail = df.tail(max(2, int(n))).copy()
+
+    closes: List[float] = []
+    dates: List[str] = []
+
+    # Try to get dates from index; fallback if index isn't usable
+    try:
+        idx = list(tail.index)
+    except Exception:
+        idx = [None] * len(tail)
+
+    series = tail[close_col]
+
+    # Build aligned arrays
+    for i, v in enumerate(series.tolist()):
+        try:
+            fv = float(v)
+            if not math.isfinite(fv):
+                continue
+        except Exception:
+            continue
+
+        closes.append(fv)
+
+        d = None
+        try:
+            if idx[i] is not None:
+                d = str(idx[i])
+        except Exception:
+            d = None
+        dates.append(d or "")
+
+    return {
+        "closes": closes,
+        "dates": dates,
+        "rows": int(len(df)),
+        "source": df.attrs.get("source", "unknown"),
+        "close_col": close_col,
+    }
+
+
 class PredictRequest(BaseModel):
     tickers: Optional[List[str]] = None
     all: bool = False
@@ -117,7 +194,7 @@ def health():
     return {
         "status": "ok",
         "service": "worldmarketreviewer",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
 
@@ -159,13 +236,66 @@ def debug_prices(ticker: str = "SPY", freq: str = "daily", lookback_days: int = 
     }
 
 
+@app.get("/api/sparkline")
+def sparkline(ticker: str = "SPY", n: int = 60, lookback_days: int = 120):
+    """
+    Returns last N closes for ticker, designed for mobile sparklines.
+
+    Example:
+      /api/sparkline?ticker=SPY&n=60
+
+    Response:
+      {
+        "ticker": "SPY",
+        "n": 60,
+        "closes": [...],
+        "dates": [...],
+        "source": "cache" | "yfinance" | ...,
+        "rows": 1523
+      }
+    """
+    t = (ticker or "").upper().strip()
+    n = max(2, min(365, int(n)))
+    lookback_days = max(n + 5, min(365 * 6, int(lookback_days)))
+
+    df = load_stock_data(t, freq="daily", lookback_days=lookback_days)
+    if df is None or df.empty:
+        return {
+            "ticker": t,
+            "n": n,
+            "closes": [],
+            "dates": [],
+            "ok": False,
+            "note": "No data returned by load_stock_data.",
+        }
+
+    payload = _sparkline_from_df(df, n=n)
+
+    # Ensure we return at most n points (if data had NaNs filtered, it can be less)
+    closes = payload.get("closes", [])[-n:]
+    dates = payload.get("dates", [])[-n:]
+
+    return {
+        "ticker": t,
+        "n": n,
+        "closes": closes,
+        "dates": dates,
+        "source": payload.get("source", df.attrs.get("source", "unknown")),
+        "rows": payload.get("rows", int(len(df))),
+        "close_col": payload.get("close_col"),
+        "ok": True,
+    }
+
+
 @app.post("/api/run_phase2")
 def run_phase2(req: PredictRequest):
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
-    tickers_list = TICKERS if req.all or not req.tickers else [
-        t.upper().strip() for t in req.tickers if t and t.strip()
-    ]
+    tickers_list = (
+        TICKERS
+        if req.all or not req.tickers
+        else [t.upper().strip() for t in req.tickers if t and t.strip()]
+    )
 
     max_parallel = max(1, int(req.max_parallel))
     horizon_days = int(req.horizon_days)
