@@ -100,7 +100,7 @@ def _sparkline_from_df(df, n: int) -> Dict[str, Any]:
 
     # Find close column
     close_col = None
-    for c in ["close", "Close", "adj_close", "Adj Close", "adjclose", "AdjClose"]:
+    for c in ["close", "Close", "adj_close", "Adj Close", "adjclose", "AdjClose", "Price"]:
         if c in df.columns:
             close_col = c
             break
@@ -109,7 +109,6 @@ def _sparkline_from_df(df, n: int) -> Dict[str, Any]:
         # As a last resort, try first numeric column
         for c in df.columns:
             try:
-                # pandas dtype check without importing pandas explicitly
                 sample = df[c].dropna().iloc[:3].tolist()
                 if sample and all(isinstance(v, (int, float)) for v in sample):
                     close_col = c
@@ -131,7 +130,6 @@ def _sparkline_from_df(df, n: int) -> Dict[str, Any]:
     closes: List[float] = []
     dates: List[str] = []
 
-    # Try to get dates from index; fallback if index isn't usable
     try:
         idx = list(tail.index)
     except Exception:
@@ -139,7 +137,6 @@ def _sparkline_from_df(df, n: int) -> Dict[str, Any]:
 
     series = tail[close_col]
 
-    # Build aligned arrays
     for i, v in enumerate(series.tolist()):
         try:
             fv = float(v)
@@ -194,7 +191,7 @@ def health():
     return {
         "status": "ok",
         "service": "worldmarketreviewer",
-        "version": "0.6.0",
+        "version": "0.6.1",
         "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
 
@@ -240,19 +237,6 @@ def debug_prices(ticker: str = "SPY", freq: str = "daily", lookback_days: int = 
 def sparkline(ticker: str = "SPY", n: int = 60, lookback_days: int = 120):
     """
     Returns last N closes for ticker, designed for mobile sparklines.
-
-    Example:
-      /api/sparkline?ticker=SPY&n=60
-
-    Response:
-      {
-        "ticker": "SPY",
-        "n": 60,
-        "closes": [...],
-        "dates": [...],
-        "source": "cache" | "yfinance" | ...,
-        "rows": 1523
-      }
     """
     t = (ticker or "").upper().strip()
     n = max(2, min(365, int(n)))
@@ -271,7 +255,6 @@ def sparkline(ticker: str = "SPY", n: int = 60, lookback_days: int = 120):
 
     payload = _sparkline_from_df(df, n=n)
 
-    # Ensure we return at most n points (if data had NaNs filtered, it can be less)
     closes = payload.get("closes", [])[-n:]
     dates = payload.get("dates", [])[-n:]
 
@@ -284,6 +267,97 @@ def sparkline(ticker: str = "SPY", n: int = 60, lookback_days: int = 120):
         "rows": payload.get("rows", int(len(df))),
         "close_col": payload.get("close_col"),
         "ok": True,
+    }
+
+
+@app.get("/api/sparklines")
+def sparklines(tickers: str = "SPY,QQQ", n: int = 60, lookback_days: int = 120, max_parallel: int = 6):
+    """
+    Batch sparkline endpoint to fetch multiple tickers in one request.
+
+    Example:
+      /api/sparklines?tickers=SPY,QQQ,NVDA&n=60
+
+    Response:
+      {
+        "n": 60,
+        "count": 3,
+        "data": { "SPY": {...}, "QQQ": {...}, "NVDA": {...} },
+        "errors": { "BAD": "No data..." }
+      }
+    """
+    raw = (tickers or "").strip()
+    parts = [p.strip().upper() for p in raw.replace(" ", ",").split(",") if p.strip()]
+    # de-dupe preserving order
+    seen = set()
+    tickers_list: List[str] = []
+    for t in parts:
+        if t and t not in seen:
+            seen.add(t)
+            tickers_list.append(t)
+
+    if not tickers_list:
+        tickers_list = ["SPY", "QQQ"]
+
+    n = max(2, min(365, int(n)))
+    lookback_days = max(n + 5, min(365 * 6, int(lookback_days)))
+    max_parallel = max(1, min(16, int(max_parallel)))
+
+    data: Dict[str, Any] = {}
+    errors: Dict[str, str] = {}
+
+    def one(t: str):
+        df = load_stock_data(t, freq="daily", lookback_days=lookback_days)
+        if df is None or df.empty:
+            return t, None, "No data returned by load_stock_data."
+        payload = _sparkline_from_df(df, n=n)
+        closes = payload.get("closes", [])[-n:]
+        dates = payload.get("dates", [])[-n:]
+        if len(closes) < 2:
+            return t, None, "Not enough valid close values."
+        out = {
+            "ticker": t,
+            "n": n,
+            "closes": closes,
+            "dates": dates,
+            "source": payload.get("source", df.attrs.get("source", "unknown")),
+            "rows": payload.get("rows", int(len(df))),
+            "close_col": payload.get("close_col"),
+            "ok": True,
+        }
+        return t, out, None
+
+    if max_parallel == 1 or len(tickers_list) == 1:
+        for t in tickers_list:
+            try:
+                tk, out, err = one(t)
+                if err:
+                    errors[tk] = err
+                else:
+                    data[tk] = out
+            except Exception as e:
+                errors[t] = str(e)
+    else:
+        with ThreadPoolExecutor(max_workers=max_parallel) as ex:
+            futs = {ex.submit(one, t): t for t in tickers_list}
+            for fut in as_completed(futs):
+                t = futs[fut]
+                try:
+                    tk, out, err = fut.result()
+                    if err:
+                        errors[tk] = err
+                    else:
+                        data[tk] = out
+                except Exception as e:
+                    errors[t] = str(e)
+
+    return {
+        "n": n,
+        "count": len(tickers_list),
+        "returned": len(data),
+        "data": data,
+        "errors": errors,
+        "tickers": tickers_list,
     }
 
 
