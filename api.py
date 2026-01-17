@@ -1,3 +1,4 @@
+# api.py
 import math
 from datetime import datetime
 from typing import List, Optional, Dict, Any
@@ -25,16 +26,13 @@ from db import (
     get_run_state,
 )
 
-# --- absolute paths (Render-safe) ---
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
 app = FastAPI(title="WorldMarketReviewer API")
-
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-# ---------------- helpers ----------------
 def json_safe(x):
     if x is None:
         return None
@@ -63,6 +61,8 @@ def _run_one_ticker(
     if df is None or len(df) < 30:
         raise ValueError("Not enough data")
 
+    source = df.attrs.get("source", "unknown")
+
     df = build_features(df, horizon_days=horizon_days)
     feature_cols = [c for c in df.columns if c not in ["target", "date"]]
 
@@ -71,17 +71,19 @@ def _run_one_ticker(
         feature_cols=feature_cols,
         target_col="target",
         ticker=t,
+        horizon_days=horizon_days,
         retrain=retrain,
         lookback=252,
         min_train=60,
     )
-
     prob_up = float(probs.iloc[-1])
+
     exp_return = compute_expected_return_from_prob(prob_up, base_move=base_weekly_move)
     direction = "UP" if prob_up >= 0.5 else "DOWN"
 
     return {
         "ticker": t,
+        "source": source,
         "prob_up": json_safe(prob_up),
         "exp_return": json_safe(exp_return),
         "direction": direction,
@@ -89,7 +91,6 @@ def _run_one_ticker(
     }
 
 
-# ---------------- request models ----------------
 class PredictRequest(BaseModel):
     tickers: Optional[List[str]] = None
     all: bool = False
@@ -107,16 +108,9 @@ class SummaryRequest(BaseModel):
     max_parallel: int = 1
 
 
-# ---------------- startup ----------------
 @app.on_event("startup")
 def _startup():
     init_db()
-
-
-# ---------------- routes ----------------
-@app.get("/")
-def root():
-    return {"message": "WorldMarketReviewer API is running", "tickers_count": len(TICKERS)}
 
 
 @app.get("/health")
@@ -124,7 +118,7 @@ def health():
     return {
         "status": "ok",
         "service": "worldmarketreviewer",
-        "version": "0.4.3",
+        "version": "0.4.6",
         "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
 
@@ -142,34 +136,63 @@ def summary_head():
     return Response(status_code=200)
 
 
+@app.get("/api/debug_prices")
+def debug_prices(ticker: str = "SPY", freq: str = "daily", lookback_days: int = 365 * 6):
+    t = (ticker or "").upper().strip()
+    df = load_stock_data(t, freq=freq, lookback_days=int(lookback_days))
+    if df is None or df.empty:
+        return {"ticker": t, "ok": False, "note": "load_stock_data returned None/empty."}
+
+    return {
+        "ticker": t,
+        "ok": True,
+        "freq": freq,
+        "source": df.attrs.get("source", "unknown"),
+        "rows": int(len(df)),
+        "start": str(df.index.min()),
+        "end": str(df.index.max()),
+        "tail": df.tail(3).reset_index().to_dict(orient="records"),
+    }
+
+
 @app.post("/api/run_phase2")
 def run_phase2(req: PredictRequest):
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
     tickers = TICKERS if req.all or not req.tickers else [
-        t.upper().strip() for t in req.tickers if t.strip()
+        t.upper().strip() for t in req.tickers if t and t.strip()
     ]
 
     create_run(run_id, total=len(tickers))
 
-    results, errors = [], {}
+    results: List[Dict[str, Any]] = []
+    errors: Dict[str, str] = {}
     completed = 0
 
-    for t in tickers:
-        try:
-            results.append(
-                _run_one_ticker(
-                    t,
-                    horizon_days=req.horizon_days,
-                    base_weekly_move=req.base_weekly_move,
-                    retrain=req.retrain,
-                )
-            )
-        except Exception as e:
-            errors[t] = str(e)
+    max_parallel = max(1, int(req.max_parallel))
 
-        completed += 1
-        update_run_progress(run_id, completed)
+    if max_parallel == 1:
+        for t in tickers:
+            try:
+                results.append(_run_one_ticker(t, req.horizon_days, req.base_weekly_move, retrain=req.retrain))
+            except Exception as e:
+                errors[t] = str(e)
+            completed += 1
+            update_run_progress(run_id, completed)
+    else:
+        with ThreadPoolExecutor(max_workers=max_parallel) as ex:
+            futs = {
+                ex.submit(_run_one_ticker, t, req.horizon_days, req.base_weekly_move, req.retrain): t
+                for t in tickers
+            }
+            for fut in as_completed(futs):
+                t = futs[fut]
+                try:
+                    results.append(fut.result())
+                except Exception as e:
+                    errors[t] = str(e)
+                completed += 1
+                update_run_progress(run_id, completed)
 
     if results:
         insert_predictions(run_id, results)
@@ -207,18 +230,15 @@ def run_status(run_id: str):
 
 @app.post("/api/summary")
 def summary_post(req: SummaryRequest):
-    results, errors = [], {}
+    tickers = req.tickers or ["SPY", "QQQ", "IWM"]
+    tickers = [t.upper().strip() for t in tickers if t and t.strip()]
 
-    for t in req.tickers or ["SPY", "QQQ", "IWM"]:
+    results: List[Dict[str, Any]] = []
+    errors: Dict[str, str] = {}
+
+    for t in tickers:
         try:
-            results.append(
-                _run_one_ticker(
-                    t,
-                    horizon_days=req.horizon_days,
-                    base_weekly_move=req.base_weekly_move,
-                    retrain=req.retrain,
-                )
-            )
+            results.append(_run_one_ticker(t, req.horizon_days, req.base_weekly_move, retrain=req.retrain))
         except Exception as e:
             errors[t] = str(e)
 
@@ -227,54 +247,24 @@ def summary_post(req: SummaryRequest):
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "predictions": results,
         "errors": errors,
+        "horizon_days": int(req.horizon_days),
+        "retrain": bool(req.retrain),
     }
 
 
 @app.get("/api/summary")
-def summary(
-    limit: int = 50,
-    run_id: Optional[str] = None,
-    tickers: Optional[str] = None,
-    retrain: int = 1,
-    horizon_days: int = 5,  # ✅ FIXED
-):
-    generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-
-    # LIVE mode
-    if tickers:
-        results, errors = [], {}
-        for t in tickers.split(","):
-            try:
-                results.append(
-                    _run_one_ticker(
-                        t.strip(),
-                        horizon_days=horizon_days,
-                        base_weekly_move=0.02,
-                        retrain=bool(retrain),
-                    )
-                )
-            except Exception as e:
-                errors[t] = str(e)
-
-        return {
-            "generated_at": generated_at,
-            "run_id": f"LIVE_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
-            "predictions": results,
-            "errors": errors,
-        }
-
-    # DB mode
+def summary(limit: int = 50, run_id: Optional[str] = None):
     if run_id is None:
         run_id = get_latest_run_id()
 
     if not run_id:
-        return {"generated_at": generated_at, "predictions": []}
+        return {"predictions": [], "note": "No predictions yet."}
 
     preds = get_predictions_for_run(run_id, limit=max(1, int(limit)))
 
     return {
-        "generated_at": generated_at,
         "run_id": run_id,
+        "count_returned": len(preds),
         "predictions": [
             {
                 "ticker": p.get("ticker"),
@@ -282,6 +272,9 @@ def summary(
                 "exp_return": json_safe(p.get("exp_return")),
                 "direction": p.get("direction"),
                 "horizon_days": p.get("horizon_days"),
+                # If you later add a DB column for source, this will show too:
+                "source": p.get("source"),
+                "generated_at": p.get("generated_at"),
             }
             for p in preds
         ],
