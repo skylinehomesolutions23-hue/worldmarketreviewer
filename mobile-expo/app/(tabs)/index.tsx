@@ -14,38 +14,44 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
 const STORAGE_KEYS = {
-  savedTickers: "wmr:savedTickers:v2",
-  recentTickers: "wmr:recentTickers:v2",
-  lastTickersInput: "wmr:lastTickersInput:v2",
-  lastHorizon: "wmr:lastHorizon:v2",
-  lastFilter: "wmr:lastFilter:v2",
-  lastSort: "wmr:lastSort:v2",
-  lastRetrain: "wmr:lastRetrain:v2",
+  savedTickers: "wmr:savedTickers:v3",
+  recentRuns: "wmr:recentRuns:v3",
+  lastTickersInput: "wmr:lastTickersInput:v3",
+  lastHorizon: "wmr:lastHorizon:v3",
+  lastFilter: "wmr:lastFilter:v3",
+  lastSort: "wmr:lastSort:v3",
+  lastRetrain: "wmr:lastRetrain:v3",
+  showDebug: "wmr:showDebug:v3",
 };
 
 const DEFAULT_TICKERS = [
   "AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","JPM","BAC","GS",
-    "MS","XOM","CVX","SPY","QQQ"
+  "MS","XOM","CVX","SPY","QQQ"
 ];
 
-type PredictionRow = {
-  ticker: string;
-  prob_up: number | null;
-  exp_return: number | null;
-  direction: "UP" | "DOWN" | string;
+type DirectionFilter = "ALL" | "UP" | "DOWN";
+type SortMode = "PROB_DESC" | "EXP_DESC" | "TICKER_ASC";
+
+type PredRow = {
+  ticker?: string;
+  prob_up?: number | null;
+  exp_return?: number | null;
+  direction?: "UP" | "DOWN" | string;
   horizon_days?: number;
-  source?: string | null;
+  source?: string; // cache / yfinance / fallback etc (if backend provides)
+  rows?: number;   // optional debug from backend
+  [k: string]: any;
 };
 
 type SummaryResponse = {
   run_id?: string;
   generated_at?: string;
   tickers?: string[];
-  horizon_days?: number;
-  retrain?: boolean;
-  predictions?: PredictionRow[];
+  predictions?: PredRow[];
   errors?: Record<string, string>;
-  [key: string]: any;
+  error?: string;
+  note?: string | null;
+  [k: string]: any;
 };
 
 function normalizeTickers(input: string): string[] {
@@ -56,29 +62,57 @@ function normalizeTickers(input: string): string[] {
     .filter((t, idx, arr) => arr.indexOf(t) === idx);
 }
 
-function fmtPct(x: number | null | undefined): string {
-  if (typeof x !== "number") return "-";
-  return (x * 100).toFixed(1) + "%";
+function fmtPct(x: any): string {
+  const n = typeof x === "number" ? x : Number(x);
+  if (!Number.isFinite(n)) return "-";
+  return `${(n * 100).toFixed(1)}%`;
 }
 
-function fmtNum(x: number | null | undefined): string {
-  if (typeof x !== "number") return "-";
-  return x.toFixed(4);
+function fmtNum(x: any, digits = 4): string {
+  const n = typeof x === "number" ? x : Number(x);
+  if (!Number.isFinite(n)) return "-";
+  return n.toFixed(digits);
+}
+
+function nowISO(): string {
+  return new Date().toISOString();
+}
+
+async function safeJson(res: Response) {
+  const txt = await res.text();
+  try {
+    return JSON.parse(txt);
+  } catch {
+    return { raw: txt };
+  }
+}
+
+function makeLocalRunId(): string {
+  const rnd = Math.random().toString(16).slice(2, 8).toUpperCase();
+  const ts = Date.now().toString(16).toUpperCase();
+  return `LOCAL-${ts}-${rnd}`;
+}
+
+function clamp01(n: any): number | null {
+  const x = typeof n === "number" ? n : Number(n);
+  if (!Number.isFinite(x)) return null;
+  return Math.max(0, Math.min(1, x));
 }
 
 export default function HomeScreen() {
-  const [tickersInput, setTickersInput] = useState<string>("SPY, QQQ, IWM");
+  const [tickersInput, setTickersInput] = useState<string>(DEFAULT_TICKERS.join(", "));
   const [savedTickers, setSavedTickers] = useState<string[]>(DEFAULT_TICKERS);
-  const [recentTickers, setRecentTickers] = useState<string[]>([]);
+  const [recentRuns, setRecentRuns] = useState<string[]>([]);
+  const [horizonDays, setHorizonDays] = useState<number>(5);
   const [retrainEveryRun, setRetrainEveryRun] = useState<boolean>(true);
 
-  const [horizonDays, setHorizonDays] = useState<number>(5);
-  const [filterDir, setFilterDir] = useState<"ALL" | "UP" | "DOWN">("ALL");
-  const [sortBy, setSortBy] = useState<"PROB" | "EXPRET" | "AZ">("PROB");
+  const [filter, setFilter] = useState<DirectionFilter>("ALL");
+  const [sortMode, setSortMode] = useState<SortMode>("PROB_DESC");
+  const [showDebug, setShowDebug] = useState<boolean>(false);
 
   const [loading, setLoading] = useState<boolean>(false);
   const [resp, setResp] = useState<SummaryResponse | null>(null);
-  const [showDebug, setShowDebug] = useState<boolean>(false);
+  const [debugLine, setDebugLine] = useState<string>("");
 
   const tickers = useMemo(() => normalizeTickers(tickersInput), [tickersInput]);
 
@@ -88,19 +122,21 @@ export default function HomeScreen() {
         const [
           saved,
           recent,
-          last,
-          h,
-          f,
-          s,
-          r,
+          lastInput,
+          lastH,
+          lastFilter,
+          lastSort,
+          lastRetrain,
+          lastShowDebug,
         ] = await Promise.all([
           AsyncStorage.getItem(STORAGE_KEYS.savedTickers),
-          AsyncStorage.getItem(STORAGE_KEYS.recentTickers),
+          AsyncStorage.getItem(STORAGE_KEYS.recentRuns),
           AsyncStorage.getItem(STORAGE_KEYS.lastTickersInput),
           AsyncStorage.getItem(STORAGE_KEYS.lastHorizon),
           AsyncStorage.getItem(STORAGE_KEYS.lastFilter),
           AsyncStorage.getItem(STORAGE_KEYS.lastSort),
           AsyncStorage.getItem(STORAGE_KEYS.lastRetrain),
+          AsyncStorage.getItem(STORAGE_KEYS.showDebug),
         ]);
 
         if (saved) {
@@ -109,17 +145,29 @@ export default function HomeScreen() {
         }
         if (recent) {
           const parsed = JSON.parse(recent);
-          if (Array.isArray(parsed)) setRecentTickers(parsed);
+          if (Array.isArray(parsed)) setRecentRuns(parsed);
         }
-        if (last && typeof last === "string" && last.trim().length > 0) {
-          setTickersInput(last);
+        if (lastInput && typeof lastInput === "string" && lastInput.trim()) {
+          setTickersInput(lastInput);
         }
-        if (h) setHorizonDays(Math.max(1, parseInt(h, 10) || 5));
-        if (f === "UP" || f === "DOWN" || f === "ALL") setFilterDir(f);
-        if (s === "PROB" || s === "EXPRET" || s === "AZ") setSortBy(s);
-        if (r === "0" || r === "1") setRetrainEveryRun(r === "1");
+        if (lastH) {
+          const n = Number(lastH);
+          if (Number.isFinite(n) && n > 0) setHorizonDays(n);
+        }
+        if (lastFilter && ["ALL", "UP", "DOWN"].includes(lastFilter)) {
+          setFilter(lastFilter as DirectionFilter);
+        }
+        if (lastSort && ["PROB_DESC", "EXP_DESC", "TICKER_ASC"].includes(lastSort)) {
+          setSortMode(lastSort as SortMode);
+        }
+        if (lastRetrain && (lastRetrain === "1" || lastRetrain === "0")) {
+          setRetrainEveryRun(lastRetrain === "1");
+        }
+        if (lastShowDebug && (lastShowDebug === "1" || lastShowDebug === "0")) {
+          setShowDebug(lastShowDebug === "1");
+        }
       } catch (e: any) {
-        // ignore
+        setDebugLine(`Init storage error: ${String(e?.message || e)}`);
       }
     })();
   }, []);
@@ -132,12 +180,27 @@ export default function HomeScreen() {
     }
   }
 
-  async function addToRecent(list: string[]) {
-    const key = list.join(",");
-    const next = [key, ...recentTickers.filter((x) => x !== key)].slice(0, 10);
-    setRecentTickers(next);
+  async function persistLastInput(val: string) {
+    await persist(STORAGE_KEYS.lastTickersInput, val);
+  }
+
+  async function persistPrefs() {
+    await Promise.all([
+      persist(STORAGE_KEYS.lastHorizon, String(horizonDays)),
+      persist(STORAGE_KEYS.lastFilter, filter),
+      persist(STORAGE_KEYS.lastSort, sortMode),
+      persist(STORAGE_KEYS.lastRetrain, retrainEveryRun ? "1" : "0"),
+      persist(STORAGE_KEYS.showDebug, showDebug ? "1" : "0"),
+    ]);
+  }
+
+  async function addToRecentRun(list: string[], h: number, retrain: boolean) {
+    // include horizon + retrain to make "repeatability" real
+    const key = `${list.join(",")}|h=${h}|r=${retrain ? 1 : 0}`;
+    const next = [key, ...recentRuns.filter((x) => x !== key)].slice(0, 10);
+    setRecentRuns(next);
     try {
-      await AsyncStorage.setItem(STORAGE_KEYS.recentTickers, JSON.stringify(next));
+      await AsyncStorage.setItem(STORAGE_KEYS.recentRuns, JSON.stringify(next));
     } catch {
       // ignore
     }
@@ -147,7 +210,7 @@ export default function HomeScreen() {
     const t = ticker.trim().toUpperCase();
     if (!t) return;
     if (savedTickers.includes(t)) return;
-    const next = [t, ...savedTickers].slice(0, 30);
+    const next = [t, ...savedTickers].slice(0, 40);
     setSavedTickers(next);
     try {
       await AsyncStorage.setItem(STORAGE_KEYS.savedTickers, JSON.stringify(next));
@@ -167,93 +230,141 @@ export default function HomeScreen() {
   }
 
   async function callSummaryAPI(list: string[]) {
-    const payload = {
-      tickers: list,
-      retrain: retrainEveryRun,
-      horizon_days: horizonDays,
-      base_weekly_move: 0.02,
-      max_parallel: 3,
-    };
+    const retrain = retrainEveryRun ? 1 : 0;
+    const qs = `tickers=${encodeURIComponent(list.join(","))}&retrain=${retrain}&horizon_days=${encodeURIComponent(
+      String(horizonDays)
+    )}`;
 
-    const res = await fetch(`${API_BASE}/api/summary`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    const txt = await res.text();
+    // Prefer POST if supported
     try {
-      return JSON.parse(txt);
+      const res = await fetch(`${API_BASE}/api/summary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tickers: list,
+          retrain: retrainEveryRun,
+          horizon_days: horizonDays,
+          max_parallel: 1,
+        }),
+      });
+      if (res.ok) return (await safeJson(res)) as SummaryResponse;
     } catch {
-      return { error: `Bad JSON: ${txt}` };
+      // ignore
     }
+
+    // GET fallback
+    const res = await fetch(`${API_BASE}/api/summary?${qs}`);
+    return (await safeJson(res)) as SummaryResponse;
   }
 
   async function runPrediction() {
     const list = tickers.length ? tickers : DEFAULT_TICKERS;
-
     setLoading(true);
     setResp(null);
 
-    try {
-      await persist(STORAGE_KEYS.lastTickersInput, tickersInput);
-      await persist(STORAGE_KEYS.lastHorizon, String(horizonDays));
-      await persist(STORAGE_KEYS.lastFilter, filterDir);
-      await persist(STORAGE_KEYS.lastSort, sortBy);
-      await persist(STORAGE_KEYS.lastRetrain, retrainEveryRun ? "1" : "0");
+    const localRunId = makeLocalRunId();
+    const localGeneratedAt = nowISO();
 
-      await addToRecent(list);
+    setDebugLine(
+      `Debug: tickers=${list.join(",")} horizon=${horizonDays} retrain=${retrainEveryRun ? "1" : "0"} local_run_id=${localRunId}`
+    );
+
+    try {
+      await persistLastInput(tickersInput);
+      await persistPrefs();
+      await addToRecentRun(list, horizonDays, retrainEveryRun);
 
       const data: SummaryResponse = await callSummaryAPI(list);
 
-      setResp(data);
+      if (!data.run_id) data.run_id = localRunId;
+      if (!data.generated_at) data.generated_at = localGeneratedAt;
 
-      if (data?.errors && Object.keys(data.errors).length > 0) {
-        // show a short error summary
-        const firstKey = Object.keys(data.errors)[0];
-        Alert.alert("Some tickers failed", `${firstKey}: ${String(data.errors[firstKey])}`);
-      }
-      if (data?.error) {
-        Alert.alert("API error", String(data.error));
-      }
+      setResp(data);
+      if (data?.error) Alert.alert("API error", String(data.error));
     } catch (e: any) {
+      setResp({
+        run_id: localRunId,
+        generated_at: localGeneratedAt,
+        error: String(e?.message || e),
+      });
       Alert.alert("Network error", String(e?.message || e));
-      setResp({ error: String(e?.message || e) });
     } finally {
       setLoading(false);
     }
   }
 
-  function applyTickerSet(csv: string) {
+  function applyTickerCSV(csv: string) {
     setTickersInput(csv);
-    persist(STORAGE_KEYS.lastTickersInput, csv);
+    persistLastInput(csv);
   }
 
-  const rawPreds = resp?.predictions || [];
+  function applyRecentKey(key: string) {
+    // format: CSV|h=5|r=1
+    const [csv, hPart, rPart] = key.split("|");
+    const h = Number((hPart || "").replace("h=", ""));
+    const r = (rPart || "").replace("r=", "") === "1";
+    if (csv) applyTickerCSV(csv);
+    if (Number.isFinite(h) && h > 0) setHorizonDays(h);
+    setRetrainEveryRun(r);
+    persistPrefs();
+  }
 
-  const filteredSortedPreds = useMemo(() => {
-    let preds = [...rawPreds];
+  const predictions: PredRow[] = useMemo(() => {
+    const raw = resp?.predictions;
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((p) => ({
+        ...p,
+        ticker: (p.ticker || "").toString().toUpperCase(),
+        prob_up: clamp01(p.prob_up),
+        exp_return: typeof p.exp_return === "number" ? p.exp_return : Number(p.exp_return),
+      }))
+      .filter((p) => p.ticker);
+  }, [resp]);
 
-    if (filterDir !== "ALL") {
-      preds = preds.filter((p) => String(p.direction).toUpperCase() === filterDir);
+  const filteredSorted = useMemo(() => {
+    let arr = [...predictions];
+
+    if (filter !== "ALL") {
+      arr = arr.filter((p) => (p.direction || "").toString().toUpperCase() === filter);
     }
 
-    if (sortBy === "AZ") {
-      preds.sort((a, b) => String(a.ticker).localeCompare(String(b.ticker)));
-    } else if (sortBy === "EXPRET") {
-      preds.sort((a, b) => (b.exp_return ?? -999) - (a.exp_return ?? -999));
+    if (sortMode === "TICKER_ASC") {
+      arr.sort((a, b) => String(a.ticker).localeCompare(String(b.ticker)));
+    } else if (sortMode === "EXP_DESC") {
+      arr.sort((a, b) => (Number(b.exp_return) || -999) - (Number(a.exp_return) || -999));
     } else {
-      preds.sort((a, b) => (b.prob_up ?? -999) - (a.prob_up ?? -999));
+      // PROB_DESC
+      arr.sort((a, b) => (Number(b.prob_up) || -999) - (Number(a.prob_up) || -999));
     }
+    return arr;
+  }, [predictions, filter, sortMode]);
 
-    return preds;
-  }, [rawPreds, filterDir, sortBy]);
+  const topUp = useMemo(() => {
+    return [...predictions]
+      .filter((p) => (p.direction || "").toString().toUpperCase() === "UP")
+      .sort((a, b) => (Number(b.prob_up) || -999) - (Number(a.prob_up) || -999))
+      .slice(0, 5);
+  }, [predictions]);
+
+  const topDown = useMemo(() => {
+    return [...predictions]
+      .filter((p) => (p.direction || "").toString().toUpperCase() === "DOWN")
+      .sort((a, b) => (Number(a.prob_up) || 999) - (Number(b.prob_up) || 999))
+      .slice(0, 5);
+  }, [predictions]);
+
+  const errorKeys = useMemo(() => {
+    const e = resp?.errors;
+    if (!e || typeof e !== "object") return [];
+    return Object.keys(e).sort();
+  }, [resp]);
 
   return (
     <View style={styles.screen}>
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>WorldMarketReviewer</Text>
-        <Text style={styles.subtitle}>Mobile Predictions (sorted + filterable)</Text>
+        <Text style={styles.subtitle}>Mobile Predictions (Render backend)</Text>
 
         <View style={styles.card}>
           <Text style={styles.label}>Tickers (comma or space separated)</Text>
@@ -261,9 +372,9 @@ export default function HomeScreen() {
             value={tickersInput}
             onChangeText={(t) => {
               setTickersInput(t);
-              persist(STORAGE_KEYS.lastTickersInput, t);
+              persistLastInput(t);
             }}
-            placeholder="SPY, QQQ, IWM"
+            placeholder="SPY, QQQ, NVDA"
             placeholderTextColor="#6b7280"
             autoCapitalize="characters"
             autoCorrect={false}
@@ -272,26 +383,30 @@ export default function HomeScreen() {
 
           <View style={styles.row}>
             <Pressable
-              onPress={() => setRetrainEveryRun((v) => !v)}
-              style={[styles.toggle, retrainEveryRun ? styles.toggleOn : styles.toggleOff]}
+              onPress={() => {
+                const next = horizonDays === 5 ? 10 : horizonDays === 10 ? 20 : 5;
+                setHorizonDays(next);
+                persist(STORAGE_KEYS.lastHorizon, String(next));
+              }}
+              style={styles.smallButton}
             >
-              <Text style={styles.toggleText}>Retrain: {retrainEveryRun ? "ON" : "OFF"}</Text>
+              <Text style={styles.smallButtonText}>Horizon: {horizonDays}d</Text>
             </Pressable>
 
-            <View style={styles.pillsRow}>
-              {[1, 5, 10, 20].map((h) => (
-                <Pressable
-                  key={h}
-                  onPress={() => {
-                    setHorizonDays(h);
-                    persist(STORAGE_KEYS.lastHorizon, String(h));
-                  }}
-                  style={[styles.pill, horizonDays === h ? styles.pillOn : styles.pillOff]}
-                >
-                  <Text style={styles.pillText}>{h}d</Text>
-                </Pressable>
-              ))}
-            </View>
+            <Pressable
+              onPress={() => {
+                setRetrainEveryRun((v) => {
+                  const nv = !v;
+                  persist(STORAGE_KEYS.lastRetrain, nv ? "1" : "0");
+                  return nv;
+                });
+              }}
+              style={[styles.smallButton, retrainEveryRun ? styles.smallButtonOn : null]}
+            >
+              <Text style={styles.smallButtonText}>
+                Retrain: {retrainEveryRun ? "ON" : "OFF"}
+              </Text>
+            </Pressable>
 
             <Pressable onPress={runPrediction} style={styles.button}>
               <Text style={styles.buttonText}>{loading ? "Running..." : "Run"}</Text>
@@ -308,13 +423,13 @@ export default function HomeScreen() {
 
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Saved tickers</Text>
-          <Text style={styles.hint}>Tap inserts. Long-press removes. “Save ticker” saves the first ticker you typed.</Text>
+          <Text style={styles.hint}>Tap to replace input. Long-press removes.</Text>
 
           <View style={styles.chipsWrap}>
             {savedTickers.map((t) => (
               <Pressable
                 key={t}
-                onPress={() => applyTickerSet(t)}
+                onPress={() => applyTickerCSV(t)}
                 onLongPress={() => removeSavedTicker(t)}
                 style={styles.chip}
               >
@@ -332,125 +447,167 @@ export default function HomeScreen() {
               }}
               style={styles.smallButton}
             >
-              <Text style={styles.smallButtonText}>Save ticker (first)</Text>
+              <Text style={styles.smallButtonText}>Save first ticker</Text>
             </Pressable>
 
-            <Pressable onPress={() => applyTickerSet(DEFAULT_TICKERS.join(", "))} style={styles.smallButton}>
+            <Pressable
+              onPress={() => applyTickerCSV(DEFAULT_TICKERS.join(", "))}
+              style={styles.smallButton}
+            >
               <Text style={styles.smallButtonText}>Defaults</Text>
             </Pressable>
           </View>
         </View>
 
         <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Recent runs</Text>
+          <Text style={styles.hint}>Tap to reuse the exact same set (improves repeatability).</Text>
+
+          {recentRuns.length === 0 ? (
+            <Text style={styles.muted}>No recent runs yet.</Text>
+          ) : (
+            <View style={styles.recentList}>
+              {recentRuns.map((key) => (
+                <Pressable key={key} onPress={() => applyRecentKey(key)} style={styles.recentItem}>
+                  <Text style={styles.recentText}>{key.replace("|", "  ")}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+        </View>
+
+        <View style={styles.card}>
           <Text style={styles.sectionTitle}>Results</Text>
-
-          <View style={styles.row}>
-            <View style={styles.pillsRow}>
-              {(["ALL", "UP", "DOWN"] as const).map((v) => (
-                <Pressable
-                  key={v}
-                  onPress={() => {
-                    setFilterDir(v);
-                    persist(STORAGE_KEYS.lastFilter, v);
-                  }}
-                  style={[styles.pill, filterDir === v ? styles.pillOn : styles.pillOff]}
-                >
-                  <Text style={styles.pillText}>{v}</Text>
-                </Pressable>
-              ))}
-            </View>
-
-            <View style={styles.pillsRow}>
-              {[
-                { k: "PROB" as const, label: "Prob↓" },
-                { k: "EXPRET" as const, label: "Exp↓" },
-                { k: "AZ" as const, label: "A→Z" },
-              ].map((x) => (
-                <Pressable
-                  key={x.k}
-                  onPress={() => {
-                    setSortBy(x.k);
-                    persist(STORAGE_KEYS.lastSort, x.k);
-                  }}
-                  style={[styles.pill, sortBy === x.k ? styles.pillOn : styles.pillOff]}
-                >
-                  <Text style={styles.pillText}>{x.label}</Text>
-                </Pressable>
-              ))}
-            </View>
-          </View>
 
           {!resp ? (
             <Text style={styles.muted}>Run to see output.</Text>
           ) : (
             <>
               <Text style={styles.meta}>
-                run_id: <Text style={styles.mono}>{String(resp.run_id || "")}</Text>
-              </Text>
-              <Text style={styles.meta}>
                 generated_at: <Text style={styles.mono}>{String(resp.generated_at || "")}</Text>
               </Text>
+              <Text style={styles.meta}>
+                run_id: <Text style={styles.mono}>{String(resp.run_id || "")}</Text>
+              </Text>
 
-              {resp?.errors && Object.keys(resp.errors).length > 0 ? (
-                <Text style={styles.errorText}>
-                  Errors: {Object.keys(resp.errors).length} (tap Debug to view)
-                </Text>
-              ) : null}
+              {resp?.error ? <Text style={styles.errorText}>Error: {String(resp.error)}</Text> : null}
 
-              {filteredSortedPreds.length === 0 ? (
-                <Text style={styles.muted}>No predictions returned.</Text>
-              ) : (
-                <View style={{ marginTop: 10 }}>
-                  {filteredSortedPreds.map((p) => (
-                    <View key={p.ticker} style={styles.resultRow}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.resultTitle}>
-                          {p.ticker}{" "}
-                          <Text style={p.direction === "UP" ? styles.up : styles.down}>
-                            {String(p.direction)}
-                          </Text>
-                        </Text>
-                        <Text style={styles.resultSub}>
-                          prob: {fmtPct(p.prob_up)} • exp: {fmtNum(p.exp_return)} • src:{" "}
-                          {p.source || "-"} • {p.horizon_days ?? horizonDays}d
-                        </Text>
-                      </View>
-                      <Text style={styles.bigPct}>{fmtPct(p.prob_up)}</Text>
-                    </View>
+              {errorKeys.length > 0 ? (
+                <View style={styles.errorBox}>
+                  <Text style={styles.errorTitle}>Ticker errors</Text>
+                  {errorKeys.map((k) => (
+                    <Text key={k} style={styles.errorItem}>
+                      • {k}: {String(resp?.errors?.[k] || "")}
+                    </Text>
                   ))}
                 </View>
-              )}
-
-              <Pressable onPress={() => setShowDebug((v) => !v)} style={styles.debugToggle}>
-                <Text style={styles.debugToggleText}>{showDebug ? "Hide Debug" : "Show Debug"}</Text>
-              </Pressable>
-
-              {showDebug ? (
-                <View style={styles.jsonBox}>
-                  <Text style={styles.monoSmall}>{JSON.stringify(resp, null, 2)}</Text>
-                </View>
               ) : null}
+
+              {predictions.length === 0 ? (
+                <Text style={styles.muted}>No predictions returned.</Text>
+              ) : (
+                <>
+                  <View style={styles.row}>
+                    <Pressable
+                      onPress={() => {
+                        const next: DirectionFilter = filter === "ALL" ? "UP" : filter === "UP" ? "DOWN" : "ALL";
+                        setFilter(next);
+                        persist(STORAGE_KEYS.lastFilter, next);
+                      }}
+                      style={styles.smallButton}
+                    >
+                      <Text style={styles.smallButtonText}>Filter: {filter}</Text>
+                    </Pressable>
+
+                    <Pressable
+                      onPress={() => {
+                        const next: SortMode =
+                          sortMode === "PROB_DESC" ? "EXP_DESC" : sortMode === "EXP_DESC" ? "TICKER_ASC" : "PROB_DESC";
+                        setSortMode(next);
+                        persist(STORAGE_KEYS.lastSort, next);
+                      }}
+                      style={styles.smallButton}
+                    >
+                      <Text style={styles.smallButtonText}>
+                        Sort: {sortMode === "PROB_DESC" ? "Prob ↓" : sortMode === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}
+                      </Text>
+                    </Pressable>
+
+                    <Pressable
+                      onPress={() => {
+                        setShowDebug((v) => {
+                          const nv = !v;
+                          persist(STORAGE_KEYS.showDebug, nv ? "1" : "0");
+                          return nv;
+                        });
+                      }}
+                      style={styles.smallButton}
+                    >
+                      <Text style={styles.smallButtonText}>{showDebug ? "Hide Debug" : "Show Debug"}</Text>
+                    </Pressable>
+                  </View>
+
+                  <View style={styles.splitRow}>
+                    <View style={styles.splitCol}>
+                      <Text style={styles.splitTitle}>Top UP</Text>
+                      {topUp.length === 0 ? (
+                        <Text style={styles.muted}>None.</Text>
+                      ) : (
+                        topUp.map((p) => <ResultCard key={`up-${p.ticker}`} p={p} />)
+                      )}
+                    </View>
+
+                    <View style={styles.splitCol}>
+                      <Text style={styles.splitTitle}>Top DOWN</Text>
+                      {topDown.length === 0 ? (
+                        <Text style={styles.muted}>None.</Text>
+                      ) : (
+                        topDown.map((p) => <ResultCard key={`down-${p.ticker}`} p={p} />)
+                      )}
+                    </View>
+                  </View>
+
+                  <Text style={styles.sectionSubtitle}>All results</Text>
+                  {filteredSorted.map((p) => (
+                    <ResultCard key={`all-${p.ticker}`} p={p} />
+                  ))}
+
+                  {showDebug ? (
+                    <View style={styles.jsonBox}>
+                      <Text style={styles.monoSmall}>{JSON.stringify(resp, null, 2)}</Text>
+                    </View>
+                  ) : null}
+                </>
+              )}
             </>
           )}
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Recent runs</Text>
-          <Text style={styles.hint}>Tap to reuse the exact same ticker set.</Text>
-
-          {recentTickers.length === 0 ? (
-            <Text style={styles.muted}>No recent runs yet.</Text>
-          ) : (
-            <View style={styles.recentList}>
-              {recentTickers.map((csv) => (
-                <Pressable key={csv} onPress={() => applyTickerSet(csv)} style={styles.recentItem}>
-                  <Text style={styles.recentText}>{csv}</Text>
-                </Pressable>
-              ))}
-            </View>
-          )}
-        </View>
+        <Text style={styles.debug}>{debugLine}</Text>
       </ScrollView>
+    </View>
+  );
+}
+
+function ResultCard({ p }: { p: PredRow }) {
+  const dir = (p.direction || "").toString().toUpperCase();
+  const prob = typeof p.prob_up === "number" ? p.prob_up : Number(p.prob_up);
+  const exp = typeof p.exp_return === "number" ? p.exp_return : Number(p.exp_return);
+
+  return (
+    <View style={styles.resultCard}>
+      <View style={styles.resultRow}>
+        <Text style={styles.resultTicker}>{p.ticker}</Text>
+        <View style={[styles.badge, dir === "UP" ? styles.badgeUp : styles.badgeDown]}>
+          <Text style={styles.badgeText}>{dir || "?"}</Text>
+        </View>
+        <Text style={styles.resultProb}>{fmtPct(prob)}</Text>
+      </View>
+
+      <Text style={styles.resultMeta}>
+        exp: {fmtNum(exp, 4)}  •  horizon: {p.horizon_days ?? "-"}d
+        {p.source ? `  •  src: ${p.source}` : ""}
+      </Text>
     </View>
   );
 }
@@ -469,7 +626,6 @@ const styles = StyleSheet.create({
     padding: 14,
     marginTop: 12,
   },
-
   label: { color: "#E5E7EB", fontWeight: "700", marginBottom: 6 },
   input: {
     backgroundColor: "#0B1220",
@@ -483,7 +639,6 @@ const styles = StyleSheet.create({
   },
 
   row: { flexDirection: "row", gap: 10, marginTop: 12, alignItems: "center", flexWrap: "wrap" },
-
   button: { backgroundColor: "#2E6BFF", paddingHorizontal: 16, paddingVertical: 12, borderRadius: 12 },
   buttonText: { color: "#FFFFFF", fontWeight: "800" },
 
@@ -495,65 +650,85 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#223256",
   },
+  smallButtonOn: { borderColor: "#2E6BFF" },
   smallButtonText: { color: "#E5E7EB", fontWeight: "700" },
-
-  toggle: { paddingHorizontal: 12, paddingVertical: 10, borderRadius: 12, borderWidth: 1 },
-  toggleOn: { backgroundColor: "#16324F", borderColor: "#2E6BFF" },
-  toggleOff: { backgroundColor: "#1B2A4A", borderColor: "#223256" },
-  toggleText: { color: "#E5E7EB", fontWeight: "700" },
-
-  pillsRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
-  pill: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 999, borderWidth: 1 },
-  pillOn: { backgroundColor: "#16324F", borderColor: "#2E6BFF" },
-  pillOff: { backgroundColor: "#0B1220", borderColor: "#223256" },
-  pillText: { color: "#E5E7EB", fontWeight: "800", fontSize: 12 },
 
   loadingRow: { marginTop: 10, flexDirection: "row", gap: 10, alignItems: "center" },
   loadingText: { color: "#A7B0C0" },
 
   sectionTitle: { color: "#FFFFFF", fontWeight: "800", fontSize: 16, marginBottom: 6 },
+  sectionSubtitle: { color: "#E5E7EB", marginTop: 12, marginBottom: 6, fontWeight: "800" },
   hint: { color: "#A7B0C0", marginBottom: 10, lineHeight: 18 },
 
   chipsWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  chip: { backgroundColor: "#0B1220", borderColor: "#223256", borderWidth: 1, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 999 },
+  chip: {
+    backgroundColor: "#0B1220",
+    borderColor: "#223256",
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 999,
+  },
   chipText: { color: "#E5E7EB", fontWeight: "800" },
 
-  muted: { color: "#A7B0C0" },
-  meta: { color: "#A7B0C0", marginBottom: 4 },
-  mono: { color: "#FFFFFF", fontFamily: "monospace" },
-
-  resultRow: {
-    flexDirection: "row",
-    gap: 10,
-    alignItems: "center",
-    paddingVertical: 10,
-    borderTopWidth: 1,
-    borderTopColor: "#223256",
-  },
-  resultTitle: { color: "#FFFFFF", fontWeight: "900", fontSize: 16 },
-  resultSub: { color: "#A7B0C0", marginTop: 3, fontSize: 12 },
-  bigPct: { color: "#FFFFFF", fontWeight: "900" },
-  up: { color: "#7CFFB2" },
-  down: { color: "#FF8A8A" },
-
-  errorText: { color: "#FF6B6B", marginTop: 8, fontWeight: "700" },
-
-  debugToggle: {
-    marginTop: 12,
+  recentList: { gap: 8 },
+  recentItem: {
     backgroundColor: "#0B1220",
     borderColor: "#223256",
     borderWidth: 1,
     borderRadius: 12,
-    paddingVertical: 10,
     paddingHorizontal: 12,
-    alignSelf: "flex-start",
+    paddingVertical: 10,
   },
-  debugToggleText: { color: "#E5E7EB", fontWeight: "800" },
+  recentText: { color: "#E5E7EB", fontWeight: "700" },
 
-  jsonBox: { marginTop: 10, backgroundColor: "#0B1220", borderColor: "#223256", borderWidth: 1, borderRadius: 12, padding: 12 },
+  muted: { color: "#A7B0C0" },
+  meta: { color: "#A7B0C0", marginBottom: 4 },
+  mono: { color: "#FFFFFF", fontFamily: "monospace" },
   monoSmall: { color: "#E5E7EB", fontFamily: "monospace", fontSize: 12, lineHeight: 16 },
 
-  recentList: { gap: 8 },
-  recentItem: { backgroundColor: "#0B1220", borderColor: "#223256", borderWidth: 1, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
-  recentText: { color: "#E5E7EB", fontWeight: "700" },
+  errorText: { color: "#FF6B6B", marginTop: 8, fontWeight: "700" },
+  errorBox: {
+    marginTop: 10,
+    backgroundColor: "#1A0F18",
+    borderColor: "#4B2030",
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+  },
+  errorTitle: { color: "#FFD1D1", fontWeight: "800", marginBottom: 6 },
+  errorItem: { color: "#FFD1D1", marginTop: 2 },
+
+  splitRow: { flexDirection: "row", gap: 10, marginTop: 10, flexWrap: "wrap" },
+  splitCol: { flexGrow: 1, flexBasis: 260 },
+  splitTitle: { color: "#FFFFFF", fontWeight: "900", marginBottom: 6 },
+
+  resultCard: {
+    backgroundColor: "#0B1220",
+    borderColor: "#223256",
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 8,
+  },
+  resultRow: { flexDirection: "row", alignItems: "center", gap: 10, flexWrap: "wrap" },
+  resultTicker: { color: "#FFFFFF", fontWeight: "900", fontSize: 16 },
+  resultProb: { color: "#E5E7EB", fontWeight: "800", marginLeft: "auto" },
+  resultMeta: { color: "#A7B0C0", marginTop: 6 },
+
+  badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, borderWidth: 1 },
+  badgeUp: { backgroundColor: "#0F2A22", borderColor: "#1ED9A6" },
+  badgeDown: { backgroundColor: "#2A1416", borderColor: "#FF6B6B" },
+  badgeText: { color: "#FFFFFF", fontWeight: "900" },
+
+  jsonBox: {
+    marginTop: 10,
+    backgroundColor: "#0B1220",
+    borderColor: "#223256",
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+  },
+
+  debug: { marginTop: 14, color: "#93A4C7", fontSize: 12 },
 });
