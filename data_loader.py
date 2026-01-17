@@ -6,37 +6,26 @@ import pandas as pd
 
 from market_data import get_daily_prices, get_monthly_prices
 
-# Paths resolved relative to this file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MONTHLY_PRICES_FILE = os.path.join(DATA_DIR, "monthly_prices.csv")
 
 
 def _detect_columns(df: pd.DataFrame):
-    """
-    Detects column names for ticker/date/price in monthly_prices.csv.
-    Supports common variants:
-      - ticker / symbol
-      - date / month / timestamp
-      - price / close / adj_close / value
-    """
     cols = {c.lower().strip(): c for c in df.columns}
 
-    # ticker
     ticker_col = None
     for k in ["ticker", "symbol"]:
         if k in cols:
             ticker_col = cols[k]
             break
 
-    # date
     date_col = None
     for k in ["date", "month", "timestamp"]:
         if k in cols:
             date_col = cols[k]
             break
 
-    # price
     price_col = None
     for k in ["price", "close", "adj close", "adj_close", "value"]:
         if k in cols:
@@ -47,10 +36,6 @@ def _detect_columns(df: pd.DataFrame):
 
 
 def _load_from_monthly_prices_csv(ticker: str) -> pd.DataFrame | None:
-    """
-    Load from data/monthly_prices.csv if present.
-    Returns a DataFrame indexed by datetime with column ['Price'].
-    """
     if not os.path.exists(MONTHLY_PRICES_FILE):
         return None
 
@@ -59,13 +44,11 @@ def _load_from_monthly_prices_csv(ticker: str) -> pd.DataFrame | None:
         if df is None or df.empty:
             return None
 
-        # If file has no headers and is just 3 columns, set them.
         if len(df.columns) == 3 and all(str(c).startswith("Unnamed") for c in df.columns):
             df.columns = ["ticker", "date", "price"]
 
         ticker_col, date_col, price_col = _detect_columns(df)
 
-        # If still not detected, assume first three columns are ticker/date/price
         if ticker_col is None or date_col is None or price_col is None:
             df = df.copy()
             df.columns = [str(c).strip() for c in df.columns]
@@ -74,12 +57,11 @@ def _load_from_monthly_prices_csv(ticker: str) -> pd.DataFrame | None:
             else:
                 return None
 
-        # Filter ticker
         sub = df[df[ticker_col].astype(str).str.upper().str.strip() == ticker].copy()
         if sub.empty:
             return None
 
-        sub[date_col] = pd.to_datetime(sub[date_col], errors="coerce")
+        sub[date_col] = pd.to_datetime(sub[date_col], errors="coerce", utc=True)
         sub[price_col] = pd.to_numeric(sub[price_col], errors="coerce")
         sub = sub.dropna(subset=[date_col, price_col])
         if sub.empty:
@@ -87,6 +69,7 @@ def _load_from_monthly_prices_csv(ticker: str) -> pd.DataFrame | None:
 
         sub = sub.sort_values(date_col).set_index(date_col)
         out = pd.DataFrame({"Price": sub[price_col].astype(float)})
+        out.attrs["source"] = "monthly_prices.csv"
         return out
 
     except Exception:
@@ -102,77 +85,67 @@ def _load_cached_prices(ticker: str, freq: str) -> pd.DataFrame | None:
     path = _cache_path(ticker, freq)
     if not os.path.exists(path):
         return None
+
     try:
         df = pd.read_csv(path)
         if df is None or df.empty:
             return None
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        if "date" not in df.columns or "price" not in df.columns:
+            return None
+
+        df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=True)
         df["price"] = pd.to_numeric(df["price"], errors="coerce")
         df = df.dropna(subset=["date", "price"]).sort_values("date")
-        if df.empty:
-            return None
-        return df
+        return df if not df.empty else None
     except Exception:
         return None
 
 
 def _save_cached_prices(ticker: str, freq: str, df: pd.DataFrame) -> None:
     try:
+        os.makedirs(DATA_DIR, exist_ok=True)
         path = _cache_path(ticker, freq)
         df.to_csv(path, index=False)
     except Exception:
         pass
 
 
-def _load_live_daily(ticker: str, period: str = "5y") -> pd.DataFrame | None:
-    """
-    Live DAILY fallback for Render: fetch via yfinance.
-    Returns DataFrame indexed by datetime with column ['Price'].
-    """
-    try:
-        raw = get_daily_prices(ticker, period=period)
-        if raw is None or raw.empty:
-            return None
+def _load_live_daily(ticker: str, period: str = "10y") -> pd.DataFrame:
+    raw, src = get_daily_prices(ticker, period=period)
+    if raw is None or raw.empty:
+        raise RuntimeError("all providers returned empty daily data")
 
-        raw = raw.copy()
-        raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
-        raw["price"] = pd.to_numeric(raw["price"], errors="coerce")
-        raw = raw.dropna(subset=["date", "price"]).sort_values("date")
-        if raw.empty:
-            return None
+    raw = raw.copy()
+    raw["date"] = pd.to_datetime(raw["date"], errors="coerce", utc=True)
+    raw["price"] = pd.to_numeric(raw["price"], errors="coerce")
+    raw = raw.dropna(subset=["date", "price"]).sort_values("date")
+    if raw.empty:
+        raise RuntimeError("daily data became empty after cleaning")
 
-        # cache for stability + fewer calls
-        _save_cached_prices(ticker, "daily", raw)
+    _save_cached_prices(ticker, "daily", raw)
 
-        out = raw.set_index("date")[["price"]].rename(columns={"price": "Price"})
-        return out
-    except Exception:
-        return None
+    out = raw.set_index("date")[["price"]].rename(columns={"price": "Price"})
+    out.attrs["source"] = src
+    return out
 
 
-def _load_live_monthly(ticker: str, period: str = "max") -> pd.DataFrame | None:
-    """
-    Live monthly fallback for Render: fetch from yfinance.
-    Returns a DataFrame indexed by datetime with column ['Price'].
-    """
-    try:
-        raw = get_monthly_prices(ticker, period=period)
-        if raw is None or raw.empty:
-            return None
+def _load_live_monthly(ticker: str, period: str = "max") -> pd.DataFrame:
+    raw, src = get_monthly_prices(ticker, period=period)
+    if raw is None or raw.empty:
+        raise RuntimeError("all providers returned empty monthly data")
 
-        raw = raw.copy()
-        raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
-        raw["price"] = pd.to_numeric(raw["price"], errors="coerce")
-        raw = raw.dropna(subset=["date", "price"]).sort_values("date")
-        if raw.empty:
-            return None
+    raw = raw.copy()
+    raw["date"] = pd.to_datetime(raw["date"], errors="coerce", utc=True)
+    raw["price"] = pd.to_numeric(raw["price"], errors="coerce")
+    raw = raw.dropna(subset=["date", "price"]).sort_values("date")
+    if raw.empty:
+        raise RuntimeError("monthly data became empty after cleaning")
 
-        _save_cached_prices(ticker, "monthly", raw)
+    _save_cached_prices(ticker, "monthly", raw)
 
-        out = raw.set_index("date")[["price"]].rename(columns={"price": "Price"})
-        return out
-    except Exception:
-        return None
+    out = raw.set_index("date")[["price"]].rename(columns={"price": "Price"})
+    out.attrs["source"] = src
+    return out
 
 
 def load_stock_data(
@@ -183,18 +156,8 @@ def load_stock_data(
     """
     Loads price data for a single ticker.
 
-    freq:
-      - "daily"  (recommended; fixes NVDA and makes 252 lookback meaningful)
-      - "monthly" (legacy)
-
-    Priority:
-      1) cached live data (data/cache_prices_<ticker>_<freq>.csv)
-      2) data/monthly_prices.csv (ONLY if freq == "monthly")
-      3) live fetch via yfinance
-
-    Returns DataFrame:
-      index: datetime
-      columns: ['Price']
+    Returns DataFrame indexed by UTC datetime with column ['Price'].
+    Also sets df.attrs['source'] to: 'cache' | 'yfinance' | 'stooq' | 'monthly_prices.csv'
     """
     t = ticker.upper().strip()
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -205,33 +168,41 @@ def load_stock_data(
     cached = _load_cached_prices(t, freq)
     if cached is not None and not cached.empty:
         out = cached.set_index("date")[["price"]].rename(columns={"price": "Price"})
+        out.attrs["source"] = "cache"
     else:
         out = None
 
-    # 2) optional monthly csv for dev
+    # 2) optional dev csv for monthly
     if out is None and freq == "monthly":
         out = _load_from_monthly_prices_csv(t)
 
     # 3) live fetch
     if out is None:
-        if freq == "monthly":
-            out = _load_live_monthly(t)
-        else:
-            out = _load_live_daily(t)
+        try:
+            if freq == "monthly":
+                out = _load_live_monthly(t)
+            else:
+                out = _load_live_daily(t)
+        except Exception as e:
+            print(f"⚠ {t}: live fetch failed ({freq}): {type(e).__name__}: {e}")
+            return None
 
     if out is None or out.empty:
-        print(f"⚠ {t}: Not enough data")
+        print(f"⚠ {t}: Not enough data (empty)")
         return None
 
-    # optional lookback trimming
+    # lookback trimming
     if lookback_days is not None:
-        # For daily data this is accurate; for monthly it still works.
-        cutoff = out.index.max() - pd.Timedelta(days=int(lookback_days))
-        out = out[out.index >= cutoff]
+        try:
+            cutoff = out.index.max() - pd.Timedelta(days=int(lookback_days))
+            out = out[out.index >= cutoff]
+        except Exception as e:
+            print(f"⚠ {t}: lookback trim failed: {type(e).__name__}: {e}")
 
     # enforce minimum size
     if len(out) < 30:
-        print(f"⚠ {t}: not enough rows ({len(out)})")
+        src = out.attrs.get("source", "?")
+        print(f"⚠ {t}: not enough rows after load ({len(out)}) source={src}")
         return None
 
     return out
