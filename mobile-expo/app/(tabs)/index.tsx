@@ -23,7 +23,10 @@ const STORAGE_KEYS = {
   lastRetrain: "wmr:lastRetrain:v2",
 };
 
-const DEFAULT_TICKERS = ["SPY", "QQQ", "IWM", "TLT", "GLD", "EEM"];
+const DEFAULT_TICKERS = [
+  "SPY", "QQQ", "IWM", "TLT", "GLD", "EEM",
+  "XLK", "XLF", "XLE", "XLV"
+];
 
 type PredictionRow = {
   ticker: string;
