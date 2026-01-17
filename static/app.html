@@ -5,158 +5,62 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>WorldMarketReviewer</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; padding: 16px; background: #ffffff; color: #111827; }
-    h1 { font-size: 20px; margin: 0 0 8px 0; }
-    .card { border: 1px solid #eee; border-radius: 12px; padding: 12px; margin: 12px 0; }
-    input, select { width: 100%; padding: 12px; font-size: 16px; border: 1px solid #ddd; border-radius: 10px; box-sizing: border-box; }
-    button { width: 100%; padding: 12px; font-size: 16px; border: 0; border-radius: 10px; background: #111827; color: white; font-weight: 800; }
-    button:disabled { opacity: 0.6; }
-    .row { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .row > * { flex: 1; }
-    .muted { opacity: 0.75; }
-    .item { padding: 10px 0; border-bottom: 1px solid #f0f0f0; }
-    .item:last-child { border-bottom: 0; }
-    .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; background: #f3f4f6; }
-    .pill-up { background: #dcfce7; color: #14532d; }
-    .pill-down { background: #fee2e2; color: #7f1d1d; }
-    .pill-uncertain { background: #e0e7ff; color: #1e3a8a; }
+    :root {
+      --bg: #0B1220;
+      --card: #111A2E;
+      --border: #223256;
+      --muted: #A7B0C0;
+      --text: #FFFFFF;
+      --chipbg: #0B1220;
+      --blue: #2E6BFF;
+      --upbg: #0F2A22;
+      --upbd: #1ED9A6;
+      --downbg: #2A1416;
+      --downbd: #FF6B6B;
+    }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; padding: 16px; background: var(--bg); color: var(--text); }
+    h1 { font-size: 20px; margin: 0 0 6px 0; }
+    .muted { color: var(--muted); }
+    .card { border: 1px solid var(--border); background: var(--card); border-radius: 14px; padding: 12px; margin: 12px 0; }
+    input { width: 100%; padding: 12px; font-size: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--chipbg); color: var(--text); }
+    button { width: 100%; padding: 12px; font-size: 16px; border: 0; border-radius: 10px; background: var(--blue); color: white; font-weight: 700; }
+    .row { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .pill { display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 12px; background: var(--chipbg); border: 1px solid var(--border); color: var(--text); font-weight: 700; }
+    .chipwrap { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip { cursor: pointer; user-select: none; }
     .small { font-size: 12px; }
-    .toggle {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 10px;
-      border-radius: 10px;
-      border: 1px solid #e5e7eb;
-      background: #f9fafb;
-      user-select: none;
-    }
-    .toggle input { width: 18px; height: 18px; }
-    .hr { height: 1px; background: #f1f5f9; margin: 12px 0; }
-
-    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-    .chip {
-      border: 1px solid #e5e7eb;
-      background: #ffffff;
-      border-radius: 999px;
-      padding: 8px 12px;
-      font-size: 13px;
-      cursor: pointer;
-      user-select: none;
-      font-weight: 800;
-    }
-    .chip:active { transform: scale(0.98); }
-    .chip.selected {
-      border-color: #111827;
-      background: #111827;
-      color: #ffffff;
-    }
-
-    .chipRow { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-    .miniBtn {
-      width: auto;
-      padding: 8px 10px;
-      font-size: 12px;
-      border-radius: 10px;
-      background: #1f2937;
-      color: #fff;
-      border: 0;
-      font-weight: 800;
-    }
-    .miniBtn.secondary {
-      background: #f3f4f6;
-      color: #111827;
-      border: 1px solid #e5e7eb;
-    }
-
-    .bar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
-    .selectedLine {
-      margin-top: 10px;
-      padding: 10px;
-      border: 1px dashed #e5e7eb;
-      border-radius: 10px;
-      background: #fcfcfd;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      font-size: 12px;
-      overflow-wrap: anywhere;
-    }
+    .item { padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .item:last-child { border-bottom: 0; }
+    .badge { display:inline-block; padding:4px 10px; border-radius:999px; border:1px solid var(--border); font-size:12px; font-weight:800; }
+    .badge.up { background: var(--upbg); border-color: var(--upbd); }
+    .badge.down { background: var(--downbg); border-color: var(--downbd); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .split { display:flex; gap:10px; flex-wrap: wrap; }
+    .col { flex: 1; min-width: 240px; }
+    details { margin-top: 10px; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #0B1220; border:1px solid var(--border); border-radius: 10px; padding: 10px; color: #E5E7EB; }
   </style>
 </head>
 <body>
   <h1>WorldMarketReviewer</h1>
-  <div class="muted">Tap tickers to select. Pick a horizon. Run.</div>
+  <div class="muted">Web app (Add to Home Screen). Backend: Render + Supabase.</div>
 
   <div class="card">
+    <div class="muted" style="margin-bottom:8px;">Tickers (comma-separated)</div>
+    <input id="tickers" value="AMZN,META,TSLA,NVDA,NFLX,AMD,INTC,JPM,BAC,GS,MS,XOM,CVX,SPY,QQQ" />
+
+    <div style="height:10px;"></div>
+
     <div class="row">
-      <div>
-        <div class="muted small" style="margin-bottom:6px;">Horizon</div>
-        <select id="horizon">
-          <option value="1">1 day</option>
-          <option value="5" selected>5 days</option>
-          <option value="10">10 days</option>
-          <option value="21">21 days</option>
-        </select>
-      </div>
-      <div>
-        <div class="muted small" style="margin-bottom:6px;">Max parallel</div>
-        <select id="maxParallel">
-          <option value="1">1 (safest)</option>
-          <option value="2">2</option>
-          <option value="3" selected>3</option>
-          <option value="4">4</option>
-        </select>
-      </div>
+      <span class="pill" id="horizonPill">Horizon: 5d</span>
+      <span class="pill" id="retrainPill">Retrain: ON</span>
+      <span class="pill" id="filterPill">Filter: ALL</span>
+      <span class="pill" id="sortPill">Sort: Prob ↓</span>
     </div>
 
-    <div class="hr"></div>
-
-    <div class="toggle" style="margin-bottom:10px;">
-      <input id="retrain" type="checkbox" checked />
-      <div>
-        <div><b>Retrain every run</b></div>
-        <div class="muted small">Turn OFF to reuse cached models (faster + more stable).</div>
-      </div>
-    </div>
-
-    <button id="runBtn" disabled>Run Predictions</button>
-
-    <div id="meta" class="muted small" style="margin-top:10px;"></div>
-    <div id="status" class="muted" style="margin-top:6px;"></div>
-  </div>
-
-  <div class="card">
-    <div class="bar">
-      <div>
-        <b>Choose tickers to run</b>
-        <div class="muted small">Selections persist on this phone.</div>
-      </div>
-      <div>
-        <span id="selectedCount" class="pill"></span>
-      </div>
-    </div>
-
-    <div class="chipRow">
-      <button class="miniBtn secondary" id="selectAllBtn" type="button">Select all</button>
-      <button class="miniBtn secondary" id="clearBtn" type="button">Clear</button>
-      <button class="miniBtn" id="defaultsBtn" type="button">Defaults</button>
-    </div>
-
-    <div class="selectedLine" id="selectedLine">Selected: (none)</div>
-
-    <div class="hr"></div>
-
-    <div class="muted small" style="margin-bottom:6px;">Search tickers</div>
-    <input id="search" placeholder="Type e.g. XL or NVDA" />
-
-    <div class="chips" id="tickerGrid"></div>
-    <div class="muted small" id="filterNote" style="margin-top:10px;"></div>
+    <div style="height:10px;"></div>
+    <button id="runBtn">Run Predictions</button>
+    <div id="status" class="muted" style="margin-top:10px;"></div>
   </div>
 
   <div class="card">
@@ -164,143 +68,153 @@
       <div><b>Results</b></div>
       <div id="runPill" class="pill" style="display:none;"></div>
     </div>
+
+    <div id="meta" class="muted small" style="margin-top:6px;"></div>
+
+    <div class="split" style="margin-top:10px;">
+      <div class="col">
+        <b>Top UP</b>
+        <div id="topUp" class="muted" style="margin-top:8px;">—</div>
+      </div>
+      <div class="col">
+        <b>Top DOWN</b>
+        <div id="topDown" class="muted" style="margin-top:8px;">—</div>
+      </div>
+    </div>
+
+    <div style="height:10px;"></div>
+    <b>All results</b>
     <div id="results" class="muted" style="margin-top:10px;">No results yet.</div>
+
+    <details>
+      <summary class="muted">Debug JSON</summary>
+      <pre id="debug" class="mono"></pre>
+    </details>
   </div>
 
 <script>
   const API = ""; // same origin
 
-  const AVAILABLE_TICKERS = [
-    "AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","JPM","BAC","GS",
-    "MS","XOM","CVX","SPY","QQQ","DIA","ORCL","IBM","CRM","ADBE","WMT",
-    "COST","HD","PFE","JNJ","UNH","BA","CAT","GE","XLK","XLF","XLE",
-    "XLV","XLI","XLY","XLP","XLU"
-  ];
-
-  const DEFAULT_SELECTED = ["SPY","QQQ","NVDA"];
-
-  const STORAGE = {
-    selected: "wmr:web:selectedTickers:v3",
-    retrain: "wmr:web:retrain:v3",
-    horizon: "wmr:web:horizon:v3",
-    maxParallel: "wmr:web:maxParallel:v3"
-  };
-
-  const UNCERTAIN_BAND = 0.02;
-
+  const elTickers = document.getElementById("tickers");
   const elRunBtn = document.getElementById("runBtn");
   const elStatus = document.getElementById("status");
-  const elMeta = document.getElementById("meta");
   const elResults = document.getElementById("results");
+  const elTopUp = document.getElementById("topUp");
+  const elTopDown = document.getElementById("topDown");
   const elRunPill = document.getElementById("runPill");
-  const elRetrain = document.getElementById("retrain");
-  const elHorizon = document.getElementById("horizon");
-  const elMaxParallel = document.getElementById("maxParallel");
+  const elMeta = document.getElementById("meta");
+  const elDebug = document.getElementById("debug");
 
-  const elGrid = document.getElementById("tickerGrid");
-  const elSelectedCount = document.getElementById("selectedCount");
-  const elSelectedLine = document.getElementById("selectedLine");
+  const elHorizonPill = document.getElementById("horizonPill");
+  const elRetrainPill = document.getElementById("retrainPill");
+  const elFilterPill = document.getElementById("filterPill");
+  const elSortPill = document.getElementById("sortPill");
 
-  const elSelectAllBtn = document.getElementById("selectAllBtn");
-  const elClearBtn = document.getElementById("clearBtn");
-  const elDefaultsBtn = document.getElementById("defaultsBtn");
+  let horizonDays = 5;
+  let retrain = true;
+  let filter = "ALL"; // ALL / UP / DOWN
+  let sort = "PROB_DESC"; // PROB_DESC / EXP_DESC / TICKER_ASC
 
-  const elSearch = document.getElementById("search");
-  const elFilterNote = document.getElementById("filterNote");
-
-  let selected = new Set();
-  let filter = "";
-
-  function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
-  function load(key, fallback) {
-    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
-    catch { return fallback; }
+  function fmtPct(x) {
+    const n = typeof x === "number" ? x : Number(x);
+    if (!Number.isFinite(n)) return "-";
+    return (n * 100).toFixed(1) + "%";
+  }
+  function fmtNum(x, digits=4) {
+    const n = typeof x === "number" ? x : Number(x);
+    if (!Number.isFinite(n)) return "-";
+    return n.toFixed(digits);
   }
 
-  function uniqUpper(list) {
-    return (list || []).map(x => String(x).toUpperCase().trim())
-      .filter(Boolean).filter((t, i, a) => a.indexOf(t) === i);
+  function setStatus(text) {
+    elStatus.textContent = text || "";
   }
 
-  function fmtPct(x) { return (typeof x === "number") ? (x * 100).toFixed(1) + "%" : "-"; }
-  function clamp01(x) { return (typeof x === "number") ? Math.max(0, Math.min(1, x)) : null; }
-
-  function pillForProb(probUp) {
-    const p = clamp01(probUp);
-    if (p === null) return { label: "UNKNOWN", cls: "pill-uncertain" };
-    if (Math.abs(p - 0.5) <= UNCERTAIN_BAND) return { label: "UNCERTAIN", cls: "pill-uncertain" };
-    return p >= 0.5 ? { label: "UP", cls: "pill-up" } : { label: "DOWN", cls: "pill-down" };
+  function badge(dir) {
+    const d = String(dir || "").toUpperCase();
+    const cls = d === "UP" ? "up" : "down";
+    return `<span class="badge ${cls}">${d || "?"}</span>`;
   }
 
-  function setStatus(text) { elStatus.textContent = text || ""; }
-  function setMeta(text) { elMeta.textContent = text || ""; }
-
-  function updateSelectedUI() {
-    const list = Array.from(selected);
-    elSelectedCount.textContent = `Selected: ${list.length}`;
-    elSelectedLine.textContent = list.length ? `Selected: ${list.join(",")}` : "Selected: (none)";
-    elRunBtn.disabled = list.length === 0;
-    save(STORAGE.selected, list);
-  }
-
-  function getFilteredTickers() {
-    const list = uniqUpper(AVAILABLE_TICKERS);
-    const f = (filter || "").trim().toUpperCase();
-    if (!f) return list;
-    return list.filter(t => t.includes(f));
-  }
-
-  function renderGrid() {
-    const list = getFilteredTickers();
-    const all = uniqUpper(AVAILABLE_TICKERS);
-
-    elGrid.innerHTML = list.map(t => {
-      const cls = selected.has(t) ? "chip selected" : "chip";
-      return `<div class="${cls}" data-t="${t}">${t}</div>`;
-    }).join("");
-
-    elFilterNote.textContent = (list.length === all.length)
-      ? `${all.length} tickers`
-      : `Showing ${list.length} of ${all.length} (filter: "${(filter || "").trim()}")`;
-
-    elGrid.querySelectorAll("[data-t]").forEach(node => {
-      node.addEventListener("click", () => {
-        const t = node.getAttribute("data-t");
-        if (!t) return;
-        if (selected.has(t)) selected.delete(t); else selected.add(t);
-        updateSelectedUI();
-        renderGrid();
-      });
-    });
-  }
-
-  function setResults(preds) {
-    if (!preds || preds.length === 0) { elResults.textContent = "No results."; return; }
-    elResults.innerHTML = preds.map(p => {
-      const pill = pillForProb(p.prob_up);
-      const exp = (typeof p.exp_return === "number") ? p.exp_return : 0;
-      const hz = (typeof p.horizon_days === "number") ? p.horizon_days : parseInt(elHorizon.value || "5", 10);
-      return `
-        <div class="item">
-          <div class="row">
-            <div><b>${p.ticker ?? "-"}</b> <span class="pill ${pill.cls}">${pill.label}</span></div>
-            <div>${fmtPct(p.prob_up)}</div>
-          </div>
-          <div class="muted small">Expected: ${exp.toFixed(4)} | Horizon: ${hz}d</div>
+  function card(p) {
+    return `
+      <div class="item">
+        <div class="row">
+          <div><b>${p.ticker}</b> ${badge(p.direction)}</div>
+          <div><b>${fmtPct(p.prob_up)}</b></div>
         </div>
-      `;
-    }).join("");
+        <div class="muted small">exp: ${fmtNum(p.exp_return,4)} • horizon: ${p.horizon_days ?? "-"}d ${p.source ? "• src: " + p.source : ""}</div>
+      </div>
+    `;
   }
+
+  function renderList(el, preds) {
+    if (!preds || preds.length === 0) {
+      el.innerHTML = `<div class="muted">None.</div>`;
+      return;
+    }
+    el.innerHTML = preds.map(card).join("");
+  }
+
+  function sortPreds(arr) {
+    const a = [...arr];
+    if (sort === "TICKER_ASC") a.sort((x,y)=>String(x.ticker).localeCompare(String(y.ticker)));
+    else if (sort === "EXP_DESC") a.sort((x,y)=>(Number(y.exp_return)||-999)-(Number(x.exp_return)||-999));
+    else a.sort((x,y)=>(Number(y.prob_up)||-999)-(Number(x.prob_up)||-999));
+    return a;
+  }
+
+  function applyFilter(arr) {
+    if (filter === "ALL") return arr;
+    return arr.filter(p => String(p.direction||"").toUpperCase() === filter);
+  }
+
+  function computeTop(preds) {
+    const ups = preds.filter(p => String(p.direction||"").toUpperCase() === "UP")
+      .sort((a,b)=>(Number(b.prob_up)||-999)-(Number(a.prob_up)||-999))
+      .slice(0,5);
+    const downs = preds.filter(p => String(p.direction||"").toUpperCase() === "DOWN")
+      .sort((a,b)=>(Number(a.prob_up)||999)-(Number(b.prob_up)||999))
+      .slice(0,5);
+    return { ups, downs };
+  }
+
+  function updatePills() {
+    elHorizonPill.textContent = `Horizon: ${horizonDays}d`;
+    elRetrainPill.textContent = `Retrain: ${retrain ? "ON" : "OFF"}`;
+    elFilterPill.textContent = `Filter: ${filter}`;
+    elSortPill.textContent = `Sort: ${sort === "PROB_DESC" ? "Prob ↓" : sort === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}`;
+  }
+
+  elHorizonPill.addEventListener("click", () => {
+    horizonDays = horizonDays === 5 ? 10 : horizonDays === 10 ? 20 : 5;
+    updatePills();
+  });
+  elRetrainPill.addEventListener("click", () => {
+    retrain = !retrain;
+    updatePills();
+  });
+  elFilterPill.addEventListener("click", () => {
+    filter = filter === "ALL" ? "UP" : filter === "UP" ? "DOWN" : "ALL";
+    updatePills();
+  });
+  elSortPill.addEventListener("click", () => {
+    sort = sort === "PROB_DESC" ? "EXP_DESC" : sort === "EXP_DESC" ? "TICKER_ASC" : "PROB_DESC";
+    updatePills();
+  });
+
+  updatePills();
 
   async function startRun(tickers) {
-    const retrain = !!elRetrain.checked;
-    const horizon_days = parseInt(elHorizon.value || "5", 10);
-    const max_parallel = parseInt(elMaxParallel.value || "3", 10);
-
     const res = await fetch(`${API}/api/run_phase2`, {
       method: "POST",
       headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ tickers, max_parallel, retrain, horizon_days })
+      body: JSON.stringify({
+        tickers,
+        horizon_days: horizonDays,
+        retrain: retrain,
+        max_parallel: 1
+      })
     });
     return res.json();
   }
@@ -311,54 +225,32 @@
   }
 
   async function getSummary(runId) {
-    const res = await fetch(`${API}/api/summary?run_id=${encodeURIComponent(runId)}`);
+    const res = await fetch(`${API}/api/summary?run_id=${encodeURIComponent(runId)}&limit=200`);
     return res.json();
   }
 
-  elSelectAllBtn.addEventListener("click", () => {
-    uniqUpper(AVAILABLE_TICKERS).forEach(t => selected.add(t));
-    updateSelectedUI(); renderGrid();
-  });
-
-  elClearBtn.addEventListener("click", () => {
-    selected = new Set();
-    updateSelectedUI(); renderGrid();
-  });
-
-  elDefaultsBtn.addEventListener("click", () => {
-    selected = new Set(uniqUpper(DEFAULT_SELECTED));
-    updateSelectedUI(); renderGrid();
-  });
-
-  elRetrain.addEventListener("change", () => save(STORAGE.retrain, !!elRetrain.checked));
-  elHorizon.addEventListener("change", () => save(STORAGE.horizon, elHorizon.value));
-  elMaxParallel.addEventListener("change", () => save(STORAGE.maxParallel, elMaxParallel.value));
-
-  elSearch.addEventListener("input", () => {
-    filter = elSearch.value || "";
-    renderGrid();
-  });
+  function clearResults() {
+    elResults.textContent = "No results.";
+    elTopUp.textContent = "—";
+    elTopDown.textContent = "—";
+    elMeta.textContent = "";
+    elDebug.textContent = "";
+  }
 
   elRunBtn.addEventListener("click", async () => {
-    const tickers = Array.from(selected);
+    const tickers = elTickers.value.split(",").map(s => s.trim()).filter(Boolean);
     if (tickers.length === 0) return;
 
     elRunBtn.disabled = true;
-    setMeta(""); setStatus("Starting run..."); setResults([]);
+    setStatus("Starting run...");
+    clearResults();
 
     const started = await startRun(tickers);
-    if (started.error) {
-      setStatus("Error: " + started.error);
-      elRunBtn.disabled = false;
-      updateSelectedUI();
-      return;
-    }
-
     const runId = started.run_id;
+
     elRunPill.style.display = "inline-block";
     elRunPill.textContent = runId;
 
-    setMeta(`retrain=${elRetrain.checked ? "1" : "0"} • horizon=${elHorizon.value}d • parallel=${elMaxParallel.value} • tickers=${tickers.join(",")}`);
     setStatus(`Running... 0/${started.total ?? tickers.length}`);
 
     const poll = setInterval(async () => {
@@ -367,7 +259,6 @@
         setStatus("Error: " + s.error);
         clearInterval(poll);
         elRunBtn.disabled = false;
-        updateSelectedUI();
         return;
       }
       setStatus(`Status: ${s.status} — ${s.progress.completed}/${s.progress.total}`);
@@ -375,32 +266,27 @@
       if (s.status === "finished") {
         clearInterval(poll);
         const out = await getSummary(runId);
-        setResults(out.predictions || []);
+        const preds = Array.isArray(out.predictions) ? out.predictions : [];
+
+        elMeta.textContent = `generated_at: ${out.generated_at || ""}  •  run_id: ${out.run_id || ""}`;
+
+        // top sections
+        const { ups, downs } = computeTop(preds);
+        renderList(elTopUp, ups);
+        renderList(elTopDown, downs);
+
+        // main list with filter/sort
+        const filtered = applyFilter(preds);
+        const sorted = sortPreds(filtered);
+        if (sorted.length === 0) elResults.textContent = "No predictions returned.";
+        else elResults.innerHTML = sorted.map(card).join("");
+
+        elDebug.textContent = JSON.stringify(out, null, 2);
         setStatus("Finished.");
         elRunBtn.disabled = false;
-        updateSelectedUI();
       }
     }, 1500);
   });
-
-  (function init() {
-    const savedSel = load(STORAGE.selected, []);
-    selected = new Set(uniqUpper(Array.isArray(savedSel) ? savedSel : []));
-
-    const savedRetrain = load(STORAGE.retrain, null);
-    if (typeof savedRetrain === "boolean") elRetrain.checked = savedRetrain;
-
-    const savedH = load(STORAGE.horizon, null);
-    if (savedH !== null) elHorizon.value = String(savedH);
-
-    const savedMP = load(STORAGE.maxParallel, null);
-    if (savedMP !== null) elMaxParallel.value = String(savedMP);
-
-    if (selected.size === 0) DEFAULT_SELECTED.forEach(t => selected.add(String(t).toUpperCase().trim()));
-
-    updateSelectedUI();
-    renderGrid();
-  })();
 </script>
 </body>
 </html>
