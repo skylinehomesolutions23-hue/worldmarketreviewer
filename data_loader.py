@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import pandas as pd
 
-from market_data import get_monthly_prices
+from market_data import get_daily_prices, get_monthly_prices
 
 # Paths resolved relative to this file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,7 +56,6 @@ def _load_from_monthly_prices_csv(ticker: str) -> pd.DataFrame | None:
 
     try:
         df = pd.read_csv(MONTHLY_PRICES_FILE)
-
         if df is None or df.empty:
             return None
 
@@ -88,20 +87,50 @@ def _load_from_monthly_prices_csv(ticker: str) -> pd.DataFrame | None:
 
         sub = sub.sort_values(date_col).set_index(date_col)
         out = pd.DataFrame({"Price": sub[price_col].astype(float)})
-
         return out
 
     except Exception:
         return None
 
 
-def _load_live_monthly(ticker: str) -> pd.DataFrame | None:
+def _cache_path(ticker: str, freq: str) -> str:
+    safe = ticker.upper().strip().replace("/", "_").replace("^", "")
+    return os.path.join(DATA_DIR, f"cache_prices_{safe}_{freq}.csv")
+
+
+def _load_cached_prices(ticker: str, freq: str) -> pd.DataFrame | None:
+    path = _cache_path(ticker, freq)
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_csv(path)
+        if df is None or df.empty:
+            return None
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["price"] = pd.to_numeric(df["price"], errors="coerce")
+        df = df.dropna(subset=["date", "price"]).sort_values("date")
+        if df.empty:
+            return None
+        return df
+    except Exception:
+        return None
+
+
+def _save_cached_prices(ticker: str, freq: str, df: pd.DataFrame) -> None:
+    try:
+        path = _cache_path(ticker, freq)
+        df.to_csv(path, index=False)
+    except Exception:
+        pass
+
+
+def _load_live_daily(ticker: str, period: str = "5y") -> pd.DataFrame | None:
     """
-    Live monthly fallback for Render: fetch from yfinance.
-    Returns a DataFrame indexed by datetime with column ['Price'].
+    Live DAILY fallback for Render: fetch via yfinance.
+    Returns DataFrame indexed by datetime with column ['Price'].
     """
     try:
-        raw = get_monthly_prices(ticker)
+        raw = get_daily_prices(ticker, period=period)
         if raw is None or raw.empty:
             return None
 
@@ -109,24 +138,59 @@ def _load_live_monthly(ticker: str) -> pd.DataFrame | None:
         raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
         raw["price"] = pd.to_numeric(raw["price"], errors="coerce")
         raw = raw.dropna(subset=["date", "price"]).sort_values("date")
-
         if raw.empty:
             return None
 
+        # cache for stability + fewer calls
+        _save_cached_prices(ticker, "daily", raw)
+
         out = raw.set_index("date")[["price"]].rename(columns={"price": "Price"})
         return out
-
     except Exception:
         return None
 
 
-def load_stock_data(ticker: str, lookback_days: int | None = None) -> pd.DataFrame | None:
+def _load_live_monthly(ticker: str, period: str = "max") -> pd.DataFrame | None:
     """
-    Loads monthly price data for a single ticker.
+    Live monthly fallback for Render: fetch from yfinance.
+    Returns a DataFrame indexed by datetime with column ['Price'].
+    """
+    try:
+        raw = get_monthly_prices(ticker, period=period)
+        if raw is None or raw.empty:
+            return None
+
+        raw = raw.copy()
+        raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
+        raw["price"] = pd.to_numeric(raw["price"], errors="coerce")
+        raw = raw.dropna(subset=["date", "price"]).sort_values("date")
+        if raw.empty:
+            return None
+
+        _save_cached_prices(ticker, "monthly", raw)
+
+        out = raw.set_index("date")[["price"]].rename(columns={"price": "Price"})
+        return out
+    except Exception:
+        return None
+
+
+def load_stock_data(
+    ticker: str,
+    lookback_days: int | None = None,
+    freq: str = "daily",
+) -> pd.DataFrame | None:
+    """
+    Loads price data for a single ticker.
+
+    freq:
+      - "daily"  (recommended; fixes NVDA and makes 252 lookback meaningful)
+      - "monthly" (legacy)
 
     Priority:
-      1) data/monthly_prices.csv (local dev)
-      2) live fetch via yfinance (Render/prod)
+      1) cached live data (data/cache_prices_<ticker>_<freq>.csv)
+      2) data/monthly_prices.csv (ONLY if freq == "monthly")
+      3) live fetch via yfinance
 
     Returns DataFrame:
       index: datetime
@@ -135,24 +199,39 @@ def load_stock_data(ticker: str, lookback_days: int | None = None) -> pd.DataFra
     t = ticker.upper().strip()
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    out = _load_from_monthly_prices_csv(t)
+    freq = (freq or "daily").lower().strip()
+
+    # 1) cache
+    cached = _load_cached_prices(t, freq)
+    if cached is not None and not cached.empty:
+        out = cached.set_index("date")[["price"]].rename(columns={"price": "Price"})
+    else:
+        out = None
+
+    # 2) optional monthly csv for dev
+    if out is None and freq == "monthly":
+        out = _load_from_monthly_prices_csv(t)
+
+    # 3) live fetch
     if out is None:
-        out = _load_live_monthly(t)
+        if freq == "monthly":
+            out = _load_live_monthly(t)
+        else:
+            out = _load_live_daily(t)
 
     if out is None or out.empty:
         print(f"⚠ {t}: Not enough data")
         return None
 
+    # optional lookback trimming
+    if lookback_days is not None:
+        # For daily data this is accurate; for monthly it still works.
+        cutoff = out.index.max() - pd.Timedelta(days=int(lookback_days))
+        out = out[out.index >= cutoff]
+
     # enforce minimum size
-    if len(out) < 10:
+    if len(out) < 30:
         print(f"⚠ {t}: not enough rows ({len(out)})")
         return None
-
-    # optional lookback: for monthly data, interpret days as roughly days,
-    # but if provided we can keep only last N rows as a proxy.
-    if lookback_days is not None:
-        # approx: 21 trading days per month -> N months ~ lookback_days / 21
-        n_months = max(10, int(lookback_days / 21))
-        out = out.tail(n_months)
 
     return out

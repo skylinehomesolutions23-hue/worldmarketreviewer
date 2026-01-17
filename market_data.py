@@ -2,39 +2,82 @@
 from __future__ import annotations
 
 import pandas as pd
-import yfinance as yf
+
+try:
+    import yfinance as yf
+except Exception:
+    yf = None
 
 
-def get_monthly_prices(ticker: str, lookback_years: int = 25) -> pd.DataFrame:
+def _require_yfinance():
+    if yf is None:
+        raise RuntimeError("yfinance is not installed. Add it to requirements.txt")
+
+
+def get_daily_prices(ticker: str, period: str = "5y") -> pd.DataFrame:
     """
-    Fetch monthly close prices for a ticker using yfinance.
-
-    Returns a DataFrame with columns:
-      - date (datetime)
-      - price (float)
+    Fetch daily prices using yfinance.
+    Returns DataFrame with columns: ['date', 'price'] where price = Adj Close if available else Close.
     """
-    t = ticker.upper().strip()
-
-    # yfinance monthly history. Use a long lookback so you have enough samples.
-    hist = yf.Ticker(t).history(period=f"{lookback_years}y", interval="1mo", auto_adjust=False)
-
-    if hist is None or hist.empty:
+    _require_yfinance()
+    t = (ticker or "").upper().strip()
+    if not t:
         return pd.DataFrame(columns=["date", "price"])
 
-    # Prefer Close; Adj Close may not exist in some feeds
-    price_col = "Close" if "Close" in hist.columns else None
-    if price_col is None:
+    df = yf.download(t, period=period, interval="1d", auto_adjust=False, progress=False)
+    if df is None or df.empty:
         return pd.DataFrame(columns=["date", "price"])
 
-    out = hist[[price_col]].copy()
-    out = out.reset_index()
+    df = df.reset_index()
 
-    # yfinance uses "Date" column after reset_index
-    date_col = "Date" if "Date" in out.columns else out.columns[0]
-    out.rename(columns={date_col: "date", price_col: "price"}, inplace=True)
+    # yfinance can name columns differently depending on version
+    date_col = "Date" if "Date" in df.columns else df.columns[0]
+    if "Adj Close" in df.columns:
+        price_series = df["Adj Close"]
+    elif "Close" in df.columns:
+        price_series = df["Close"]
+    else:
+        # fallback: try last column
+        price_series = df.iloc[:, -1]
 
-    out["date"] = pd.to_datetime(out["date"], errors="coerce")
-    out["price"] = pd.to_numeric(out["price"], errors="coerce")
-    out = out.dropna(subset=["date", "price"]).sort_values("date")
+    out = pd.DataFrame(
+        {
+            "date": pd.to_datetime(df[date_col], errors="coerce"),
+            "price": pd.to_numeric(price_series, errors="coerce"),
+        }
+    ).dropna()
 
-    return out[["date", "price"]]
+    return out
+
+
+def get_monthly_prices(ticker: str, period: str = "max") -> pd.DataFrame:
+    """
+    Fetch monthly prices using yfinance.
+    Returns DataFrame with columns: ['date', 'price'] where price = Adj Close if available else Close.
+    """
+    _require_yfinance()
+    t = (ticker or "").upper().strip()
+    if not t:
+        return pd.DataFrame(columns=["date", "price"])
+
+    df = yf.download(t, period=period, interval="1mo", auto_adjust=False, progress=False)
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["date", "price"])
+
+    df = df.reset_index()
+    date_col = "Date" if "Date" in df.columns else df.columns[0]
+    if "Adj Close" in df.columns:
+        price_series = df["Adj Close"]
+    elif "Close" in df.columns:
+        price_series = df["Close"]
+    else:
+        price_series = df.iloc[:, -1]
+
+    out = pd.DataFrame(
+        {
+            "date": pd.to_datetime(df[date_col], errors="coerce"),
+            "price": pd.to_numeric(price_series, errors="coerce"),
+        }
+    ).dropna()
+
+    return out
