@@ -19,15 +19,10 @@ def _require_yfinance():
 
 
 def _as_date_price_df_from_yf(raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize yfinance output into DataFrame columns: ['date','price'].
-    """
     if raw is None or raw.empty:
         return pd.DataFrame(columns=["date", "price"])
 
     df = raw.copy().reset_index()
-
-    # yfinance sometimes names the index/col differently
     date_col = "Date" if "Date" in df.columns else df.columns[0]
 
     if "Adj Close" in df.columns:
@@ -55,7 +50,7 @@ def _yf_download(ticker: str, period: str, interval: str) -> pd.DataFrame:
         interval=interval,
         auto_adjust=False,
         progress=False,
-        threads=False,  # important on servers
+        threads=False,
         group_by="column",
     )
 
@@ -70,7 +65,13 @@ def _yf_history(ticker: str, period: str, interval: str) -> pd.DataFrame:
     )
 
 
-def _fetch_yfinance(ticker: str, period: str, interval: str, attempts: int = 3) -> Tuple[pd.DataFrame, str]:
+def _is_rate_limit_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    # yfinance can raise different exception classes; message check is safest
+    return "rate limit" in msg or "too many requests" in msg or "yfratelimiterror" in msg
+
+
+def _fetch_yfinance(ticker: str, period: str, interval: str, attempts: int = 2) -> Tuple[pd.DataFrame, str]:
     last_err: Optional[str] = None
 
     for i in range(1, attempts + 1):
@@ -81,6 +82,8 @@ def _fetch_yfinance(ticker: str, period: str, interval: str, attempts: int = 3) 
             if not df.empty:
                 return df.sort_values("date"), "yfinance"
         except Exception as e:
+            if _is_rate_limit_error(e):
+                raise RuntimeError(f"yfinance rate limited: {e}")
             last_err = f"yfinance download() failed: {type(e).__name__}: {e}"
 
         time.sleep(0.6 * i)
@@ -92,6 +95,8 @@ def _fetch_yfinance(ticker: str, period: str, interval: str, attempts: int = 3) 
             if not df.empty:
                 return df.sort_values("date"), "yfinance"
         except Exception as e:
+            if _is_rate_limit_error(e):
+                raise RuntimeError(f"yfinance rate limited: {e}")
             last_err = f"yfinance history() failed: {type(e).__name__}: {e}"
 
         time.sleep(0.6 * i)
@@ -100,9 +105,6 @@ def _fetch_yfinance(ticker: str, period: str, interval: str, attempts: int = 3) 
 
 
 def _stooq_symbol(ticker: str) -> str:
-    """
-    Stooq commonly supports US tickers as '<ticker>.us' in lowercase.
-    """
     t = (ticker or "").strip().lower().replace("^", "")
     if not t:
         return ""
@@ -117,7 +119,7 @@ def _fetch_stooq_daily(ticker: str) -> Tuple[pd.DataFrame, str]:
         raise RuntimeError("stooq: empty symbol")
 
     url = "https://stooq.com/q/d/l/"
-    params = {"s": sym, "i": "d"}  # daily CSV
+    params = {"s": sym, "i": "d"}
 
     r = requests.get(url, params=params, timeout=20)
     if r.status_code != 200:
@@ -127,7 +129,6 @@ def _fetch_stooq_daily(ticker: str) -> Tuple[pd.DataFrame, str]:
     df = pd.read_csv(StringIO(r.text))
     if df is None or df.empty or "Date" not in df.columns:
         raise RuntimeError("stooq returned empty/invalid CSV")
-
     if "Close" not in df.columns:
         raise RuntimeError("stooq CSV missing Close")
 
@@ -146,9 +147,6 @@ def _fetch_stooq_daily(ticker: str) -> Tuple[pd.DataFrame, str]:
 
 
 def _daily_to_monthly_last(daily: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert daily ['date','price'] to monthly by taking the last price in each month.
-    """
     d = daily.copy()
     d["date"] = pd.to_datetime(d["date"], errors="coerce", utc=True)
     d["price"] = pd.to_numeric(d["price"], errors="coerce")
@@ -162,21 +160,17 @@ def _daily_to_monthly_last(daily: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_daily_prices(ticker: str, period: str = "10y") -> Tuple[pd.DataFrame, str]:
-    """
-    Returns (df, source) where df has columns ['date','price'] (UTC).
-    Source order: yfinance -> stooq
-    """
     t = (ticker or "").upper().strip()
     if not t:
         return pd.DataFrame(columns=["date", "price"]), "none"
 
-    # 1) yfinance
+    # yfinance first
     try:
-        return _fetch_yfinance(t, period=period, interval="1d", attempts=3)
+        return _fetch_yfinance(t, period=period, interval="1d", attempts=2)
     except Exception as e_yf:
         last = f"{e_yf}"
 
-    # 2) stooq
+    # stooq fallback
     try:
         return _fetch_stooq_daily(t)
     except Exception as e_st:
@@ -186,22 +180,17 @@ def get_daily_prices(ticker: str, period: str = "10y") -> Tuple[pd.DataFrame, st
 
 
 def get_monthly_prices(ticker: str, period: str = "max") -> Tuple[pd.DataFrame, str]:
-    """
-    Returns (df, source) monthly (UTC).
-    Source order: yfinance monthly -> stooq daily resampled to monthly
-    """
     t = (ticker or "").upper().strip()
     if not t:
         return pd.DataFrame(columns=["date", "price"]), "none"
 
-    # 1) yfinance monthly
+    # yfinance monthly first
     try:
-        df, src = _fetch_yfinance(t, period=period, interval="1mo", attempts=3)
-        return df, src
+        return _fetch_yfinance(t, period=period, interval="1mo", attempts=2)
     except Exception as e_yf:
         last = f"{e_yf}"
 
-    # 2) stooq daily -> monthly
+    # stooq daily -> monthly
     try:
         daily, _ = _fetch_stooq_daily(t)
         monthly = _daily_to_monthly_last(daily)

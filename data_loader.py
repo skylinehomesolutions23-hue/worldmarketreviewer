@@ -10,6 +10,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MONTHLY_PRICES_FILE = os.path.join(DATA_DIR, "monthly_prices.csv")
 
+# Cache freshness settings (tune as you want)
+CACHE_TTL_HOURS_DAILY = 24   # only refetch daily once per day
+CACHE_TTL_HOURS_MONTHLY = 24 * 7  # monthly cache ~weekly
+
 
 def _detect_columns(df: pd.DataFrame):
     cols = {c.lower().strip(): c for c in df.columns}
@@ -81,6 +85,27 @@ def _cache_path(ticker: str, freq: str) -> str:
     return os.path.join(DATA_DIR, f"cache_prices_{safe}_{freq}.csv")
 
 
+def _is_cache_fresh(df: pd.DataFrame, ttl_hours: int) -> bool:
+    """
+    Cache is considered fresh if it has a fetched_at_utc column and
+    the newest fetched_at_utc is within ttl_hours.
+    """
+    if df is None or df.empty:
+        return False
+    if "fetched_at_utc" not in df.columns:
+        # older cache format -> treat as stale but usable
+        return False
+
+    try:
+        fetched = pd.to_datetime(df["fetched_at_utc"], errors="coerce", utc=True).dropna()
+        if fetched.empty:
+            return False
+        age = pd.Timestamp.utcnow().tz_localize("UTC") - fetched.max()
+        return age <= pd.Timedelta(hours=int(ttl_hours))
+    except Exception:
+        return False
+
+
 def _load_cached_prices(ticker: str, freq: str) -> pd.DataFrame | None:
     path = _cache_path(ticker, freq)
     if not os.path.exists(path):
@@ -104,13 +129,16 @@ def _load_cached_prices(ticker: str, freq: str) -> pd.DataFrame | None:
 def _save_cached_prices(ticker: str, freq: str, df: pd.DataFrame) -> None:
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
+        out = df.copy()
+        # Stamp fetch time (UTC) so TTL works
+        out["fetched_at_utc"] = pd.Timestamp.utcnow().tz_localize("UTC").isoformat()
         path = _cache_path(ticker, freq)
-        df.to_csv(path, index=False)
+        out.to_csv(path, index=False)
     except Exception:
         pass
 
 
-def _load_live_daily(ticker: str, period: str = "10y") -> pd.DataFrame:
+def _live_fetch_daily(ticker: str, period: str = "10y") -> pd.DataFrame:
     raw, src = get_daily_prices(ticker, period=period)
     if raw is None or raw.empty:
         raise RuntimeError("all providers returned empty daily data")
@@ -129,7 +157,7 @@ def _load_live_daily(ticker: str, period: str = "10y") -> pd.DataFrame:
     return out
 
 
-def _load_live_monthly(ticker: str, period: str = "max") -> pd.DataFrame:
+def _live_fetch_monthly(ticker: str, period: str = "max") -> pd.DataFrame:
     raw, src = get_monthly_prices(ticker, period=period)
     if raw is None or raw.empty:
         raise RuntimeError("all providers returned empty monthly data")
@@ -154,38 +182,51 @@ def load_stock_data(
     freq: str = "daily",
 ) -> pd.DataFrame | None:
     """
-    Loads price data for a single ticker.
-
     Returns DataFrame indexed by UTC datetime with column ['Price'].
-    Also sets df.attrs['source'] to: 'cache' | 'yfinance' | 'stooq' | 'monthly_prices.csv'
+    df.attrs['source'] will be: 'cache' | 'cache_stale' | 'yfinance' | 'stooq' | 'monthly_prices.csv'
     """
     t = ticker.upper().strip()
     os.makedirs(DATA_DIR, exist_ok=True)
 
     freq = (freq or "daily").lower().strip()
 
+    ttl = CACHE_TTL_HOURS_DAILY if freq == "daily" else CACHE_TTL_HOURS_MONTHLY
+
     # 1) cache
     cached = _load_cached_prices(t, freq)
     if cached is not None and not cached.empty:
-        out = cached.set_index("date")[["price"]].rename(columns={"price": "Price"})
-        out.attrs["source"] = "cache"
+        fresh = _is_cache_fresh(cached, ttl_hours=ttl)
+        out_cached = cached.set_index("date")[["price"]].rename(columns={"price": "Price"})
+        out_cached.attrs["source"] = "cache" if fresh else "cache_stale"
+
+        # If cache is fresh, return immediately (prevents yfinance rate limits)
+        if fresh:
+            out = out_cached
+        else:
+            out = None
     else:
         out = None
+        out_cached = None
 
-    # 2) optional dev csv for monthly
+    # 2) optional monthly csv for dev
     if out is None and freq == "monthly":
         out = _load_from_monthly_prices_csv(t)
 
-    # 3) live fetch
+    # 3) live fetch with fallback to stale cache if providers fail
     if out is None:
         try:
             if freq == "monthly":
-                out = _load_live_monthly(t)
+                out = _live_fetch_monthly(t)
             else:
-                out = _load_live_daily(t)
+                out = _live_fetch_daily(t)
         except Exception as e:
             print(f"⚠ {t}: live fetch failed ({freq}): {type(e).__name__}: {e}")
-            return None
+
+            # If we have stale cache, use it rather than failing hard
+            if out_cached is not None and not out_cached.empty:
+                out = out_cached
+            else:
+                return None
 
     if out is None or out.empty:
         print(f"⚠ {t}: Not enough data (empty)")
@@ -199,7 +240,7 @@ def load_stock_data(
         except Exception as e:
             print(f"⚠ {t}: lookback trim failed: {type(e).__name__}: {e}")
 
-    # enforce minimum size
+    # minimum rows
     if len(out) < 30:
         src = out.attrs.get("source", "?")
         print(f"⚠ {t}: not enough rows after load ({len(out)}) source={src}")
