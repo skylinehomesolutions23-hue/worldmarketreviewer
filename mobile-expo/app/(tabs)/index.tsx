@@ -10,6 +10,7 @@ import {
   View,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import Sparkline from "../../components/Sparkline";
 
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
@@ -25,8 +26,8 @@ const STORAGE_KEYS = {
 };
 
 const DEFAULT_TICKERS = [
-  "AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","JPM","BAC","GS",
-  "MS","XOM","CVX","SPY","QQQ"
+  "AMZN", "META", "TSLA", "NVDA", "NFLX", "AMD", "INTC", "JPM", "BAC", "GS",
+  "MS", "XOM", "CVX", "SPY", "QQQ",
 ];
 
 type DirectionFilter = "ALL" | "UP" | "DOWN";
@@ -52,6 +53,16 @@ type SummaryResponse = {
   error?: string;
   note?: string | null;
   [k: string]: any;
+};
+
+type SparklineResponse = {
+  ticker?: string;
+  n?: number;
+  closes?: number[];
+  dates?: string[];
+  source?: string;
+  rows?: number;
+  error?: string;
 };
 
 function normalizeTickers(input: string): string[] {
@@ -99,6 +110,13 @@ function clamp01(n: any): number | null {
   return Math.max(0, Math.min(1, x));
 }
 
+function dirColor(dir: string): string {
+  const d = (dir || "").toString().toUpperCase();
+  if (d === "UP") return "#1ED9A6";
+  if (d === "DOWN") return "#FF6B6B";
+  return "#93A4C7";
+}
+
 export default function HomeScreen() {
   const [tickersInput, setTickersInput] = useState<string>(DEFAULT_TICKERS.join(", "));
   const [savedTickers, setSavedTickers] = useState<string[]>(DEFAULT_TICKERS);
@@ -113,6 +131,12 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState<boolean>(false);
   const [resp, setResp] = useState<SummaryResponse | null>(null);
   const [debugLine, setDebugLine] = useState<string>("");
+
+  // Sparkline state
+  const [sparkN] = useState<number>(60);
+  const [sparks, setSparks] = useState<Record<string, number[]>>({});
+  const [sparkErr, setSparkErr] = useState<Record<string, string>>({});
+  const [sparkLoading, setSparkLoading] = useState<Record<string, boolean>>({});
 
   const tickers = useMemo(() => normalizeTickers(tickersInput), [tickersInput]);
 
@@ -195,7 +219,6 @@ export default function HomeScreen() {
   }
 
   async function addToRecentRun(list: string[], h: number, retrain: boolean) {
-    // include horizon + retrain to make "repeatability" real
     const key = `${list.join(",")}|h=${h}|r=${retrain ? 1 : 0}`;
     const next = [key, ...recentRuns.filter((x) => x !== key)].slice(0, 10);
     setRecentRuns(next);
@@ -257,10 +280,22 @@ export default function HomeScreen() {
     return (await safeJson(res)) as SummaryResponse;
   }
 
+  async function callSparklineAPI(ticker: string, n: number) {
+    const url = `${API_BASE}/api/sparkline?ticker=${encodeURIComponent(ticker)}&n=${encodeURIComponent(String(n))}`;
+    const res = await fetch(url);
+    const data = (await safeJson(res)) as SparklineResponse;
+    return { ok: res.ok, data };
+  }
+
   async function runPrediction() {
     const list = tickers.length ? tickers : DEFAULT_TICKERS;
     setLoading(true);
     setResp(null);
+
+    // Reset sparklines for a clean refresh (prevents stale charts)
+    setSparks({});
+    setSparkErr({});
+    setSparkLoading({});
 
     const localRunId = makeLocalRunId();
     const localGeneratedAt = nowISO();
@@ -299,7 +334,6 @@ export default function HomeScreen() {
   }
 
   function applyRecentKey(key: string) {
-    // format: CSV|h=5|r=1
     const [csv, hPart, rPart] = key.split("|");
     const h = Number((hPart || "").replace("h=", ""));
     const r = (rPart || "").replace("r=", "") === "1";
@@ -360,6 +394,66 @@ export default function HomeScreen() {
     return Object.keys(e).sort();
   }, [resp]);
 
+  // Fetch sparklines after predictions arrive (light concurrency cap)
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchAll() {
+      const list = predictions
+        .map((p) => (p.ticker || "").toString().toUpperCase())
+        .filter(Boolean);
+
+      const unique = Array.from(new Set(list));
+      if (unique.length === 0) return;
+
+      const concurrency = 4;
+      let idx = 0;
+
+      const worker = async () => {
+        while (!cancelled) {
+          const t = unique[idx++];
+          if (!t) return;
+
+          // Skip if already loaded
+          if (sparks[t] && sparks[t].length >= 2) continue;
+
+          setSparkLoading((m) => ({ ...m, [t]: true }));
+          try {
+            const { ok, data } = await callSparklineAPI(t, sparkN);
+            if (cancelled) return;
+
+            if (!ok || data?.error) {
+              setSparkErr((m) => ({ ...m, [t]: String(data?.error || "sparkline failed") }));
+              continue;
+            }
+            const closes = Array.isArray(data?.closes) ? data.closes : [];
+            if (closes.length >= 2) {
+              setSparks((m) => ({ ...m, [t]: closes }));
+            } else {
+              setSparkErr((m) => ({ ...m, [t]: "not enough sparkline data" }));
+            }
+          } catch (e: any) {
+            setSparkErr((m) => ({ ...m, [t]: String(e?.message || e) }));
+          } finally {
+            setSparkLoading((m) => ({ ...m, [t]: false }));
+          }
+        }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(concurrency, unique.length) }, worker));
+    }
+
+    // Only run when we have predictions, and we haven't already loaded some for them
+    if (predictions.length > 0) {
+      fetchAll();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [predictions, sparkN]);
+
   return (
     <View style={styles.screen}>
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
@@ -403,9 +497,7 @@ export default function HomeScreen() {
               }}
               style={[styles.smallButton, retrainEveryRun ? styles.smallButtonOn : null]}
             >
-              <Text style={styles.smallButtonText}>
-                Retrain: {retrainEveryRun ? "ON" : "OFF"}
-              </Text>
+              <Text style={styles.smallButtonText}>Retrain: {retrainEveryRun ? "ON" : "OFF"}</Text>
             </Pressable>
 
             <Pressable onPress={runPrediction} style={styles.button}>
@@ -510,7 +602,8 @@ export default function HomeScreen() {
                   <View style={styles.row}>
                     <Pressable
                       onPress={() => {
-                        const next: DirectionFilter = filter === "ALL" ? "UP" : filter === "UP" ? "DOWN" : "ALL";
+                        const next: DirectionFilter =
+                          filter === "ALL" ? "UP" : filter === "UP" ? "DOWN" : "ALL";
                         setFilter(next);
                         persist(STORAGE_KEYS.lastFilter, next);
                       }}
@@ -522,14 +615,23 @@ export default function HomeScreen() {
                     <Pressable
                       onPress={() => {
                         const next: SortMode =
-                          sortMode === "PROB_DESC" ? "EXP_DESC" : sortMode === "EXP_DESC" ? "TICKER_ASC" : "PROB_DESC";
+                          sortMode === "PROB_DESC"
+                            ? "EXP_DESC"
+                            : sortMode === "EXP_DESC"
+                            ? "TICKER_ASC"
+                            : "PROB_DESC";
                         setSortMode(next);
                         persist(STORAGE_KEYS.lastSort, next);
                       }}
                       style={styles.smallButton}
                     >
                       <Text style={styles.smallButtonText}>
-                        Sort: {sortMode === "PROB_DESC" ? "Prob ↓" : sortMode === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}
+                        Sort:{" "}
+                        {sortMode === "PROB_DESC"
+                          ? "Prob ↓"
+                          : sortMode === "EXP_DESC"
+                          ? "Exp ↓"
+                          : "Ticker A–Z"}
                       </Text>
                     </Pressable>
 
@@ -543,7 +645,9 @@ export default function HomeScreen() {
                       }}
                       style={styles.smallButton}
                     >
-                      <Text style={styles.smallButtonText}>{showDebug ? "Hide Debug" : "Show Debug"}</Text>
+                      <Text style={styles.smallButtonText}>
+                        {showDebug ? "Hide Debug" : "Show Debug"}
+                      </Text>
                     </Pressable>
                   </View>
 
@@ -553,7 +657,7 @@ export default function HomeScreen() {
                       {topUp.length === 0 ? (
                         <Text style={styles.muted}>None.</Text>
                       ) : (
-                        topUp.map((p) => <ResultCard key={`up-${p.ticker}`} p={p} />)
+                        topUp.map((p) => <ResultCard key={`up-${p.ticker}`} p={p} spark={sparks[p.ticker || ""]} sparkLoading={!!sparkLoading[p.ticker || ""]} />)
                       )}
                     </View>
 
@@ -562,14 +666,19 @@ export default function HomeScreen() {
                       {topDown.length === 0 ? (
                         <Text style={styles.muted}>None.</Text>
                       ) : (
-                        topDown.map((p) => <ResultCard key={`down-${p.ticker}`} p={p} />)
+                        topDown.map((p) => <ResultCard key={`down-${p.ticker}`} p={p} spark={sparks[p.ticker || ""]} sparkLoading={!!sparkLoading[p.ticker || ""]} />)
                       )}
                     </View>
                   </View>
 
                   <Text style={styles.sectionSubtitle}>All results</Text>
                   {filteredSorted.map((p) => (
-                    <ResultCard key={`all-${p.ticker}`} p={p} />
+                    <ResultCard
+                      key={`all-${p.ticker}`}
+                      p={p}
+                      spark={sparks[p.ticker || ""]}
+                      sparkLoading={!!sparkLoading[p.ticker || ""]}
+                    />
                   ))}
 
                   {showDebug ? (
@@ -589,19 +698,42 @@ export default function HomeScreen() {
   );
 }
 
-function ResultCard({ p }: { p: PredRow }) {
+function ResultCard({
+  p,
+  spark,
+  sparkLoading,
+}: {
+  p: PredRow;
+  spark?: number[];
+  sparkLoading?: boolean;
+}) {
   const dir = (p.direction || "").toString().toUpperCase();
   const prob = typeof p.prob_up === "number" ? p.prob_up : Number(p.prob_up);
   const exp = typeof p.exp_return === "number" ? p.exp_return : Number(p.exp_return);
+
+  const color = dirColor(dir);
 
   return (
     <View style={styles.resultCard}>
       <View style={styles.resultRow}>
         <Text style={styles.resultTicker}>{p.ticker}</Text>
+
         <View style={[styles.badge, dir === "UP" ? styles.badgeUp : styles.badgeDown]}>
           <Text style={styles.badgeText}>{dir || "?"}</Text>
         </View>
+
         <Text style={styles.resultProb}>{fmtPct(prob)}</Text>
+      </View>
+
+      <View style={styles.sparkRow}>
+        <View style={{ opacity: spark && spark.length >= 2 ? 1 : 0.6 }}>
+          <Sparkline values={spark || []} width={140} height={34} stroke={color} strokeWidth={2} />
+        </View>
+        {sparkLoading ? (
+          <View style={{ paddingLeft: 10 }}>
+            <ActivityIndicator />
+          </View>
+        ) : null}
       </View>
 
       <Text style={styles.resultMeta}>
@@ -715,6 +847,8 @@ const styles = StyleSheet.create({
   resultTicker: { color: "#FFFFFF", fontWeight: "900", fontSize: 16 },
   resultProb: { color: "#E5E7EB", fontWeight: "800", marginLeft: "auto" },
   resultMeta: { color: "#A7B0C0", marginTop: 6 },
+
+  sparkRow: { flexDirection: "row", alignItems: "center", justifyContent: "flex-start", marginTop: 8 },
 
   badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, borderWidth: 1 },
   badgeUp: { backgroundColor: "#0F2A22", borderColor: "#1ED9A6" },
