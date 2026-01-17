@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,7 +11,6 @@ import {
   View,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import Sparkline from "../../components/Sparkline";
 
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
@@ -23,24 +23,36 @@ const STORAGE_KEYS = {
   lastSort: "wmr:lastSort:v3",
   lastRetrain: "wmr:lastRetrain:v3",
   showDebug: "wmr:showDebug:v3",
+  highOnly: "wmr:highOnly:v1",
 };
 
 const DEFAULT_TICKERS = [
-  "AMZN", "META", "TSLA", "NVDA", "NFLX", "AMD", "INTC", "JPM", "BAC", "GS",
-  "MS", "XOM", "CVX", "SPY", "QQQ",
+  "AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","JPM","BAC","GS",
+  "MS","XOM","CVX","SPY","QQQ"
 ];
 
 type DirectionFilter = "ALL" | "UP" | "DOWN";
 type SortMode = "PROB_DESC" | "EXP_DESC" | "TICKER_ASC";
 
 type PredRow = {
+  id?: number;
   ticker?: string;
   prob_up?: number | null;
   exp_return?: number | null;
   direction?: "UP" | "DOWN" | string;
   horizon_days?: number;
-  source?: string; // cache / yfinance / fallback etc (if backend provides)
-  rows?: number;   // optional debug from backend
+  source?: string;
+  rows?: number;
+
+  as_of_date?: string | null;
+  as_of_close?: number | null;
+  realized_return?: number | null;
+  realized_direction?: string | null;
+  scored_at?: string | null;
+
+  confidence?: "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN" | string;
+  confidence_score?: number | null;
+
   [k: string]: any;
 };
 
@@ -53,16 +65,6 @@ type SummaryResponse = {
   error?: string;
   note?: string | null;
   [k: string]: any;
-};
-
-type SparklineResponse = {
-  ticker?: string;
-  n?: number;
-  closes?: number[];
-  dates?: string[];
-  source?: string;
-  rows?: number;
-  error?: string;
 };
 
 function normalizeTickers(input: string): string[] {
@@ -110,11 +112,31 @@ function clamp01(n: any): number | null {
   return Math.max(0, Math.min(1, x));
 }
 
-function dirColor(dir: string): string {
-  const d = (dir || "").toString().toUpperCase();
-  if (d === "UP") return "#1ED9A6";
-  if (d === "DOWN") return "#FF6B6B";
-  return "#93A4C7";
+function confRank(label: any): number {
+  const s = String(label || "").toUpperCase();
+  if (s === "HIGH") return 3;
+  if (s === "MEDIUM") return 2;
+  if (s === "LOW") return 1;
+  return 0;
+}
+
+function confLabelFromProb(probUp: number | null): "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN" {
+  if (probUp === null) return "UNKNOWN";
+  const p = Math.abs(probUp - 0.5); // distance from coinflip
+  if (p >= 0.20) return "HIGH";
+  if (p >= 0.10) return "MEDIUM";
+  if (p >= 0.00) return "LOW";
+  return "UNKNOWN";
+}
+
+async function openUrl(url: string) {
+  try {
+    const ok = await Linking.canOpenURL(url);
+    if (!ok) return Alert.alert("Cannot open link", url);
+    await Linking.openURL(url);
+  } catch {
+    Alert.alert("Cannot open link", url);
+  }
 }
 
 export default function HomeScreen() {
@@ -127,16 +149,11 @@ export default function HomeScreen() {
   const [filter, setFilter] = useState<DirectionFilter>("ALL");
   const [sortMode, setSortMode] = useState<SortMode>("PROB_DESC");
   const [showDebug, setShowDebug] = useState<boolean>(false);
+  const [highOnly, setHighOnly] = useState<boolean>(false);
 
   const [loading, setLoading] = useState<boolean>(false);
   const [resp, setResp] = useState<SummaryResponse | null>(null);
   const [debugLine, setDebugLine] = useState<string>("");
-
-  // Sparkline state
-  const [sparkN] = useState<number>(60);
-  const [sparks, setSparks] = useState<Record<string, number[]>>({});
-  const [sparkErr, setSparkErr] = useState<Record<string, string>>({});
-  const [sparkLoading, setSparkLoading] = useState<Record<string, boolean>>({});
 
   const tickers = useMemo(() => normalizeTickers(tickersInput), [tickersInput]);
 
@@ -152,6 +169,7 @@ export default function HomeScreen() {
           lastSort,
           lastRetrain,
           lastShowDebug,
+          lastHighOnly,
         ] = await Promise.all([
           AsyncStorage.getItem(STORAGE_KEYS.savedTickers),
           AsyncStorage.getItem(STORAGE_KEYS.recentRuns),
@@ -161,6 +179,7 @@ export default function HomeScreen() {
           AsyncStorage.getItem(STORAGE_KEYS.lastSort),
           AsyncStorage.getItem(STORAGE_KEYS.lastRetrain),
           AsyncStorage.getItem(STORAGE_KEYS.showDebug),
+          AsyncStorage.getItem(STORAGE_KEYS.highOnly),
         ]);
 
         if (saved) {
@@ -190,6 +209,9 @@ export default function HomeScreen() {
         if (lastShowDebug && (lastShowDebug === "1" || lastShowDebug === "0")) {
           setShowDebug(lastShowDebug === "1");
         }
+        if (lastHighOnly && (lastHighOnly === "1" || lastHighOnly === "0")) {
+          setHighOnly(lastHighOnly === "1");
+        }
       } catch (e: any) {
         setDebugLine(`Init storage error: ${String(e?.message || e)}`);
       }
@@ -208,13 +230,28 @@ export default function HomeScreen() {
     await persist(STORAGE_KEYS.lastTickersInput, val);
   }
 
-  async function persistPrefs() {
+  async function persistPrefs(next?: Partial<{
+    horizonDays: number;
+    filter: DirectionFilter;
+    sortMode: SortMode;
+    retrainEveryRun: boolean;
+    showDebug: boolean;
+    highOnly: boolean;
+  }>) {
+    const h = next?.horizonDays ?? horizonDays;
+    const f = next?.filter ?? filter;
+    const s = next?.sortMode ?? sortMode;
+    const r = next?.retrainEveryRun ?? retrainEveryRun;
+    const d = next?.showDebug ?? showDebug;
+    const ho = next?.highOnly ?? highOnly;
+
     await Promise.all([
-      persist(STORAGE_KEYS.lastHorizon, String(horizonDays)),
-      persist(STORAGE_KEYS.lastFilter, filter),
-      persist(STORAGE_KEYS.lastSort, sortMode),
-      persist(STORAGE_KEYS.lastRetrain, retrainEveryRun ? "1" : "0"),
-      persist(STORAGE_KEYS.showDebug, showDebug ? "1" : "0"),
+      persist(STORAGE_KEYS.lastHorizon, String(h)),
+      persist(STORAGE_KEYS.lastFilter, f),
+      persist(STORAGE_KEYS.lastSort, s),
+      persist(STORAGE_KEYS.lastRetrain, r ? "1" : "0"),
+      persist(STORAGE_KEYS.showDebug, d ? "1" : "0"),
+      persist(STORAGE_KEYS.highOnly, ho ? "1" : "0"),
     ]);
   }
 
@@ -224,9 +261,7 @@ export default function HomeScreen() {
     setRecentRuns(next);
     try {
       await AsyncStorage.setItem(STORAGE_KEYS.recentRuns, JSON.stringify(next));
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   async function addSavedTicker(ticker: string) {
@@ -237,9 +272,7 @@ export default function HomeScreen() {
     setSavedTickers(next);
     try {
       await AsyncStorage.setItem(STORAGE_KEYS.savedTickers, JSON.stringify(next));
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   async function removeSavedTicker(ticker: string) {
@@ -247,18 +280,13 @@ export default function HomeScreen() {
     setSavedTickers(next);
     try {
       await AsyncStorage.setItem(STORAGE_KEYS.savedTickers, JSON.stringify(next));
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   async function callSummaryAPI(list: string[]) {
-    const retrain = retrainEveryRun ? 1 : 0;
-    const qs = `tickers=${encodeURIComponent(list.join(","))}&retrain=${retrain}&horizon_days=${encodeURIComponent(
-      String(horizonDays)
-    )}`;
+    const min_confidence = highOnly ? "HIGH" : undefined;
 
-    // Prefer POST if supported
+    // Prefer POST (live predictions)
     try {
       const res = await fetch(`${API_BASE}/api/summary`, {
         method: "POST",
@@ -268,6 +296,7 @@ export default function HomeScreen() {
           retrain: retrainEveryRun,
           horizon_days: horizonDays,
           max_parallel: 1,
+          min_confidence,
         }),
       });
       if (res.ok) return (await safeJson(res)) as SummaryResponse;
@@ -275,16 +304,13 @@ export default function HomeScreen() {
       // ignore
     }
 
-    // GET fallback
+    // GET fallback (stored predictions)
+    const retrain = retrainEveryRun ? 1 : 0;
+    const qs = `tickers=${encodeURIComponent(list.join(","))}&retrain=${retrain}&horizon_days=${encodeURIComponent(
+      String(horizonDays)
+    )}`;
     const res = await fetch(`${API_BASE}/api/summary?${qs}`);
     return (await safeJson(res)) as SummaryResponse;
-  }
-
-  async function callSparklineAPI(ticker: string, n: number) {
-    const url = `${API_BASE}/api/sparkline?ticker=${encodeURIComponent(ticker)}&n=${encodeURIComponent(String(n))}`;
-    const res = await fetch(url);
-    const data = (await safeJson(res)) as SparklineResponse;
-    return { ok: res.ok, data };
   }
 
   async function runPrediction() {
@@ -292,16 +318,11 @@ export default function HomeScreen() {
     setLoading(true);
     setResp(null);
 
-    // Reset sparklines for a clean refresh (prevents stale charts)
-    setSparks({});
-    setSparkErr({});
-    setSparkLoading({});
-
     const localRunId = makeLocalRunId();
     const localGeneratedAt = nowISO();
 
     setDebugLine(
-      `Debug: tickers=${list.join(",")} horizon=${horizonDays} retrain=${retrainEveryRun ? "1" : "0"} local_run_id=${localRunId}`
+      `Debug: tickers=${list.join(",")} horizon=${horizonDays} retrain=${retrainEveryRun ? "1" : "0"} highOnly=${highOnly ? "1" : "0"} local_run_id=${localRunId}`
     );
 
     try {
@@ -334,30 +355,41 @@ export default function HomeScreen() {
   }
 
   function applyRecentKey(key: string) {
+    // format: CSV|h=5|r=1
     const [csv, hPart, rPart] = key.split("|");
     const h = Number((hPart || "").replace("h=", ""));
     const r = (rPart || "").replace("r=", "") === "1";
     if (csv) applyTickerCSV(csv);
     if (Number.isFinite(h) && h > 0) setHorizonDays(h);
     setRetrainEveryRun(r);
-    persistPrefs();
+    persistPrefs({ horizonDays: Number.isFinite(h) && h > 0 ? h : horizonDays, retrainEveryRun: r });
   }
 
   const predictions: PredRow[] = useMemo(() => {
     const raw = resp?.predictions;
     if (!Array.isArray(raw)) return [];
     return raw
-      .map((p) => ({
-        ...p,
-        ticker: (p.ticker || "").toString().toUpperCase(),
-        prob_up: clamp01(p.prob_up),
-        exp_return: typeof p.exp_return === "number" ? p.exp_return : Number(p.exp_return),
-      }))
+      .map((p) => {
+        const prob = clamp01(p.prob_up);
+        const computedLabel = confLabelFromProb(prob);
+        return {
+          ...p,
+          ticker: (p.ticker || "").toString().toUpperCase(),
+          prob_up: prob,
+          exp_return: typeof p.exp_return === "number" ? p.exp_return : Number(p.exp_return),
+          confidence: (p.confidence ? String(p.confidence).toUpperCase() : computedLabel) as any,
+          confidence_score: p.confidence_score ?? (prob === null ? null : Math.abs(prob - 0.5)),
+        };
+      })
       .filter((p) => p.ticker);
   }, [resp]);
 
   const filteredSorted = useMemo(() => {
     let arr = [...predictions];
+
+    if (highOnly) {
+      arr = arr.filter((p) => confRank(p.confidence) >= 3);
+    }
 
     if (filter !== "ALL") {
       arr = arr.filter((p) => (p.direction || "").toString().toUpperCase() === filter);
@@ -368,11 +400,17 @@ export default function HomeScreen() {
     } else if (sortMode === "EXP_DESC") {
       arr.sort((a, b) => (Number(b.exp_return) || -999) - (Number(a.exp_return) || -999));
     } else {
-      // PROB_DESC
-      arr.sort((a, b) => (Number(b.prob_up) || -999) - (Number(a.prob_up) || -999));
+      // PROB_DESC: tie-breaker by confidence label
+      arr.sort((a, b) => {
+        const pb = Number(b.prob_up);
+        const pa = Number(a.prob_up);
+        if (pb !== pa) return (pb || -999) - (pa || -999);
+        return confRank(b.confidence) - confRank(a.confidence);
+      });
     }
+
     return arr;
-  }, [predictions, filter, sortMode]);
+  }, [predictions, filter, sortMode, highOnly]);
 
   const topUp = useMemo(() => {
     return [...predictions]
@@ -393,66 +431,6 @@ export default function HomeScreen() {
     if (!e || typeof e !== "object") return [];
     return Object.keys(e).sort();
   }, [resp]);
-
-  // Fetch sparklines after predictions arrive (light concurrency cap)
-  useEffect(() => {
-    let cancelled = false;
-
-    async function fetchAll() {
-      const list = predictions
-        .map((p) => (p.ticker || "").toString().toUpperCase())
-        .filter(Boolean);
-
-      const unique = Array.from(new Set(list));
-      if (unique.length === 0) return;
-
-      const concurrency = 4;
-      let idx = 0;
-
-      const worker = async () => {
-        while (!cancelled) {
-          const t = unique[idx++];
-          if (!t) return;
-
-          // Skip if already loaded
-          if (sparks[t] && sparks[t].length >= 2) continue;
-
-          setSparkLoading((m) => ({ ...m, [t]: true }));
-          try {
-            const { ok, data } = await callSparklineAPI(t, sparkN);
-            if (cancelled) return;
-
-            if (!ok || data?.error) {
-              setSparkErr((m) => ({ ...m, [t]: String(data?.error || "sparkline failed") }));
-              continue;
-            }
-            const closes = Array.isArray(data?.closes) ? data.closes : [];
-            if (closes.length >= 2) {
-              setSparks((m) => ({ ...m, [t]: closes }));
-            } else {
-              setSparkErr((m) => ({ ...m, [t]: "not enough sparkline data" }));
-            }
-          } catch (e: any) {
-            setSparkErr((m) => ({ ...m, [t]: String(e?.message || e) }));
-          } finally {
-            setSparkLoading((m) => ({ ...m, [t]: false }));
-          }
-        }
-      };
-
-      await Promise.all(Array.from({ length: Math.min(concurrency, unique.length) }, worker));
-    }
-
-    // Only run when we have predictions, and we haven't already loaded some for them
-    if (predictions.length > 0) {
-      fetchAll();
-    }
-
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [predictions, sparkN]);
 
   return (
     <View style={styles.screen}>
@@ -500,6 +478,19 @@ export default function HomeScreen() {
               <Text style={styles.smallButtonText}>Retrain: {retrainEveryRun ? "ON" : "OFF"}</Text>
             </Pressable>
 
+            <Pressable
+              onPress={() => {
+                setHighOnly((v) => {
+                  const nv = !v;
+                  persist(STORAGE_KEYS.highOnly, nv ? "1" : "0");
+                  return nv;
+                });
+              }}
+              style={[styles.smallButton, highOnly ? styles.smallButtonOn : null]}
+            >
+              <Text style={styles.smallButtonText}>High only: {highOnly ? "ON" : "OFF"}</Text>
+            </Pressable>
+
             <Pressable onPress={runPrediction} style={styles.button}>
               <Text style={styles.buttonText}>{loading ? "Running..." : "Run"}</Text>
             </Pressable>
@@ -511,6 +502,15 @@ export default function HomeScreen() {
               <Text style={styles.loadingText}>Fetching predictions…</Text>
             </View>
           )}
+
+          <View style={styles.row}>
+            <Pressable
+              onPress={() => openUrl(`${API_BASE}/api/explain`)}
+              style={styles.linkButton}
+            >
+              <Text style={styles.linkButtonText}>What am I looking at?</Text>
+            </Pressable>
+          </View>
         </View>
 
         <View style={styles.card}>
@@ -553,7 +553,7 @@ export default function HomeScreen() {
 
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Recent runs</Text>
-          <Text style={styles.hint}>Tap to reuse the exact same set (improves repeatability).</Text>
+          <Text style={styles.hint}>Tap to reuse the exact same set (repeatability).</Text>
 
           {recentRuns.length === 0 ? (
             <Text style={styles.muted}>No recent runs yet.</Text>
@@ -626,12 +626,7 @@ export default function HomeScreen() {
                       style={styles.smallButton}
                     >
                       <Text style={styles.smallButtonText}>
-                        Sort:{" "}
-                        {sortMode === "PROB_DESC"
-                          ? "Prob ↓"
-                          : sortMode === "EXP_DESC"
-                          ? "Exp ↓"
-                          : "Ticker A–Z"}
+                        Sort: {sortMode === "PROB_DESC" ? "Prob ↓" : sortMode === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}
                       </Text>
                     </Pressable>
 
@@ -645,9 +640,7 @@ export default function HomeScreen() {
                       }}
                       style={styles.smallButton}
                     >
-                      <Text style={styles.smallButtonText}>
-                        {showDebug ? "Hide Debug" : "Show Debug"}
-                      </Text>
+                      <Text style={styles.smallButtonText}>{showDebug ? "Hide Debug" : "Show Debug"}</Text>
                     </Pressable>
                   </View>
 
@@ -657,7 +650,7 @@ export default function HomeScreen() {
                       {topUp.length === 0 ? (
                         <Text style={styles.muted}>None.</Text>
                       ) : (
-                        topUp.map((p) => <ResultCard key={`up-${p.ticker}`} p={p} spark={sparks[p.ticker || ""]} sparkLoading={!!sparkLoading[p.ticker || ""]} />)
+                        topUp.map((p) => <ResultCard key={`up-${p.ticker}`} p={p} />)
                       )}
                     </View>
 
@@ -666,19 +659,14 @@ export default function HomeScreen() {
                       {topDown.length === 0 ? (
                         <Text style={styles.muted}>None.</Text>
                       ) : (
-                        topDown.map((p) => <ResultCard key={`down-${p.ticker}`} p={p} spark={sparks[p.ticker || ""]} sparkLoading={!!sparkLoading[p.ticker || ""]} />)
+                        topDown.map((p) => <ResultCard key={`down-${p.ticker}`} p={p} />)
                       )}
                     </View>
                   </View>
 
                   <Text style={styles.sectionSubtitle}>All results</Text>
                   {filteredSorted.map((p) => (
-                    <ResultCard
-                      key={`all-${p.ticker}`}
-                      p={p}
-                      spark={sparks[p.ticker || ""]}
-                      sparkLoading={!!sparkLoading[p.ticker || ""]}
-                    />
+                    <ResultCard key={`all-${p.ticker}`} p={p} />
                   ))}
 
                   {showDebug ? (
@@ -698,48 +686,60 @@ export default function HomeScreen() {
   );
 }
 
-function ResultCard({
-  p,
-  spark,
-  sparkLoading,
-}: {
-  p: PredRow;
-  spark?: number[];
-  sparkLoading?: boolean;
-}) {
+function ResultCard({ p }: { p: PredRow }) {
   const dir = (p.direction || "").toString().toUpperCase();
   const prob = typeof p.prob_up === "number" ? p.prob_up : Number(p.prob_up);
   const exp = typeof p.exp_return === "number" ? p.exp_return : Number(p.exp_return);
+  const conf = String(p.confidence || confLabelFromProb(clamp01(prob))).toUpperCase();
+  const ticker = String(p.ticker || "").toUpperCase();
 
-  const color = dirColor(dir);
+  const confStyle =
+    conf === "HIGH" ? styles.badgeConfHigh : conf === "MEDIUM" ? styles.badgeConfMed : styles.badgeConfLow;
 
   return (
     <View style={styles.resultCard}>
       <View style={styles.resultRow}>
-        <Text style={styles.resultTicker}>{p.ticker}</Text>
+        <Text style={styles.resultTicker}>{ticker}</Text>
 
         <View style={[styles.badge, dir === "UP" ? styles.badgeUp : styles.badgeDown]}>
           <Text style={styles.badgeText}>{dir || "?"}</Text>
         </View>
 
-        <Text style={styles.resultProb}>{fmtPct(prob)}</Text>
-      </View>
-
-      <View style={styles.sparkRow}>
-        <View style={{ opacity: spark && spark.length >= 2 ? 1 : 0.6 }}>
-          <Sparkline values={spark || []} width={140} height={34} stroke={color} strokeWidth={2} />
+        <View style={[styles.badge, confStyle]}>
+          <Text style={styles.badgeText}>{conf}</Text>
         </View>
-        {sparkLoading ? (
-          <View style={{ paddingLeft: 10 }}>
-            <ActivityIndicator />
-          </View>
-        ) : null}
+
+        <Text style={styles.resultProb}>{fmtPct(prob)}</Text>
       </View>
 
       <Text style={styles.resultMeta}>
         exp: {fmtNum(exp, 4)}  •  horizon: {p.horizon_days ?? "-"}d
         {p.source ? `  •  src: ${p.source}` : ""}
       </Text>
+
+      <View style={styles.row}>
+        <Pressable
+          onPress={() => openUrl(`${API_BASE}/api/verify?ticker=${encodeURIComponent(ticker)}&horizon_days=${encodeURIComponent(String(p.horizon_days ?? 5))}`)}
+          style={styles.linkPill}
+        >
+          <Text style={styles.linkPillText}>Verify</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => openUrl(`${API_BASE}/api/metrics?ticker=${encodeURIComponent(ticker)}&horizon_days=${encodeURIComponent(String(p.horizon_days ?? 5))}`)}
+          style={styles.linkPill}
+        >
+          <Text style={styles.linkPillText}>Report card</Text>
+        </Pressable>
+      </View>
+
+      {p.as_of_date ? (
+        <Text style={styles.mutedSmall}>
+          as_of: {String(p.as_of_date).slice(0, 10)}
+          {p.scored_at ? `  •  scored` : `  •  not scored yet`}
+          {p.realized_return != null ? `  •  realized: ${fmtPct(p.realized_return)}` : ""}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -785,6 +785,26 @@ const styles = StyleSheet.create({
   smallButtonOn: { borderColor: "#2E6BFF" },
   smallButtonText: { color: "#E5E7EB", fontWeight: "700" },
 
+  linkButton: {
+    backgroundColor: "#0B1220",
+    borderColor: "#223256",
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  linkButtonText: { color: "#E5E7EB", fontWeight: "800" },
+
+  linkPill: {
+    backgroundColor: "#0B1220",
+    borderColor: "#223256",
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  linkPillText: { color: "#E5E7EB", fontWeight: "800" },
+
   loadingRow: { marginTop: 10, flexDirection: "row", gap: 10, alignItems: "center" },
   loadingText: { color: "#A7B0C0" },
 
@@ -815,6 +835,7 @@ const styles = StyleSheet.create({
   recentText: { color: "#E5E7EB", fontWeight: "700" },
 
   muted: { color: "#A7B0C0" },
+  mutedSmall: { color: "#A7B0C0", fontSize: 12, marginTop: 8 },
   meta: { color: "#A7B0C0", marginBottom: 4 },
   mono: { color: "#FFFFFF", fontFamily: "monospace" },
   monoSmall: { color: "#E5E7EB", fontFamily: "monospace", fontSize: 12, lineHeight: 16 },
@@ -848,11 +869,14 @@ const styles = StyleSheet.create({
   resultProb: { color: "#E5E7EB", fontWeight: "800", marginLeft: "auto" },
   resultMeta: { color: "#A7B0C0", marginTop: 6 },
 
-  sparkRow: { flexDirection: "row", alignItems: "center", justifyContent: "flex-start", marginTop: 8 },
-
   badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, borderWidth: 1 },
   badgeUp: { backgroundColor: "#0F2A22", borderColor: "#1ED9A6" },
   badgeDown: { backgroundColor: "#2A1416", borderColor: "#FF6B6B" },
+
+  badgeConfHigh: { backgroundColor: "#102A4A", borderColor: "#2E6BFF" },
+  badgeConfMed: { backgroundColor: "#2A2510", borderColor: "#FFD166" },
+  badgeConfLow: { backgroundColor: "#1B2A4A", borderColor: "#223256" },
+
   badgeText: { color: "#FFFFFF", fontWeight: "900" },
 
   jsonBox: {

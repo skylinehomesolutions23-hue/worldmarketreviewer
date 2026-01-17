@@ -36,6 +36,9 @@ app = FastAPI(title="WorldMarketReviewer API")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+# -----------------------------
+# helpers
+# -----------------------------
 def json_safe(x):
     if x is None:
         return None
@@ -62,14 +65,41 @@ def compute_expected_return_from_prob(prob_up: float, base_move: float = 0.02) -
     return (2.0 * prob_up - 1.0) * float(base_move)
 
 
+def confidence_score(prob_up: Optional[float]) -> Optional[float]:
+    """
+    0.0 means coin flip (0.50). 1.0 means extreme (0 or 1).
+    """
+    if prob_up is None:
+        return None
+    p = clamp01(prob_up)
+    if p is None:
+        return None
+    return abs(p - 0.5) * 2.0
+
+
+def confidence_label(prob_up: Optional[float]) -> str:
+    """
+    Based on distance from 0.5:
+      LOW    : 0.50–0.55 (or 0.45–0.50, but we still label)
+      MEDIUM : 0.55–0.65
+      HIGH   : 0.65+
+    We use |p-0.5|.
+    """
+    cs = confidence_score(prob_up)
+    if cs is None:
+        return "UNKNOWN"
+    # cs corresponds: 0.10 -> p=0.55 ; 0.30 -> p=0.65
+    if cs >= 0.30:
+        return "HIGH"
+    if cs >= 0.10:
+        return "MEDIUM"
+    return "LOW"
+
+
 def _to_date_key(s: str) -> str:
-    """
-    Normalize various datetime string formats to YYYY-MM-DD for matching.
-    """
     s = (s or "").strip()
     if not s:
         return ""
-    # common: "2026-01-16 05:00:00+00:00" -> "2026-01-16"
     if len(s) >= 10 and s[4] == "-" and s[7] == "-":
         return s[:10]
     return s
@@ -81,17 +111,8 @@ def _load_prices(
     lookback_days: int = 365 * 6,
     source_pref: str = "auto",
 ) -> Any:
-    """
-    Wrapper around load_stock_data that *tries* to respect a requested source.
-    If your load_stock_data doesn't support source selection, we fall back safely.
-
-    source_pref:
-      - "auto" (default)
-      - "cache" / "yfinance" (only if your loader supports it)
-    """
     t = (ticker or "").upper().strip()
     source_pref = (source_pref or "auto").lower().strip()
-
     try:
         return load_stock_data(t, freq=freq, lookback_days=int(lookback_days), source=source_pref)
     except TypeError:
@@ -106,7 +127,6 @@ def _find_close_col(df) -> Optional[str]:
         if c in df.columns:
             return c
 
-    # last resort: first numeric-ish column
     for c in df.columns:
         try:
             sample = df[c].dropna().iloc[:3].tolist()
@@ -153,7 +173,6 @@ def _sparkline_from_df(df, n: int) -> Dict[str, Any]:
             continue
 
         closes.append(fv)
-
         d = None
         try:
             if idx[i] is not None:
@@ -185,9 +204,6 @@ def _pct_change(a: Optional[float], b: Optional[float]) -> Optional[float]:
 
 
 def _extract_as_of(df) -> Tuple[Optional[str], Optional[float], Optional[str]]:
-    """
-    Returns (as_of_date_str, as_of_close, close_col)
-    """
     payload = _sparkline_from_df(df, n=3)
     closes = payload.get("closes") or []
     dates = payload.get("dates") or []
@@ -196,6 +212,9 @@ def _extract_as_of(df) -> Tuple[Optional[str], Optional[float], Optional[str]]:
     return dates[-1], closes[-1], payload.get("close_col")
 
 
+# -----------------------------
+# core prediction
+# -----------------------------
 def _run_one_ticker(
     ticker: str,
     horizon_days: int,
@@ -210,7 +229,6 @@ def _run_one_ticker(
 
     source = df.attrs.get("source", "unknown")
 
-    # Store as-of snapshot for later scoring
     as_of_date, as_of_close, _ = _extract_as_of(df)
 
     df_feat = build_features(df, horizon_days=horizon_days)
@@ -240,20 +258,13 @@ def _run_one_ticker(
         "horizon_days": int(horizon_days),
         "as_of_date": as_of_date,
         "as_of_close": json_safe(as_of_close),
+        # confidence fields (computed, not stored)
+        "confidence_score": json_safe(confidence_score(prob_up)),
+        "confidence": confidence_label(prob_up),
     }
 
 
 def _score_one_prediction_row(row: Dict[str, Any], source_pref: str = "auto") -> Tuple[int, str, str, Optional[float], Optional[str], str]:
-    """
-    Returns: (id, ticker, as_of_date_key, realized_return, realized_direction, status)
-    status:
-      - "scored"
-      - "not_matured" (not enough future days yet)
-      - "missing_asof"
-      - "no_data"
-      - "no_close_col"
-      - "asof_not_found"
-    """
     pred_id = int(row["id"])
     ticker = (row.get("ticker") or "").upper().strip()
     as_of_date = row.get("as_of_date") or ""
@@ -271,7 +282,6 @@ def _score_one_prediction_row(row: Dict[str, Any], source_pref: str = "auto") ->
     if close_col is None:
         return pred_id, ticker, as_of_key, None, None, "no_close_col"
 
-    # Build normalized date keys for the index
     try:
         idx_strs = [str(x) for x in df.index]
     except Exception:
@@ -282,8 +292,6 @@ def _score_one_prediction_row(row: Dict[str, Any], source_pref: str = "auto") ->
     try:
         pos = idx_keys.index(as_of_key)
     except ValueError:
-        # allow near-match: if as_of_key is not found, try last available date <= as_of_key (rare)
-        # (we keep it simple: fail)
         return pred_id, ticker, as_of_key, None, None, "asof_not_found"
 
     target_pos = pos + horizon_days
@@ -303,6 +311,9 @@ def _score_one_prediction_row(row: Dict[str, Any], source_pref: str = "auto") ->
     return pred_id, ticker, as_of_key, realized_return, realized_direction, "scored"
 
 
+# -----------------------------
+# request models
+# -----------------------------
 class PredictRequest(BaseModel):
     tickers: Optional[List[str]] = None
     all: bool = False
@@ -318,8 +329,14 @@ class SummaryRequest(BaseModel):
     horizon_days: int = 5
     base_weekly_move: float = 0.02
     max_parallel: int = 1
+    # NEW: confidence filtering
+    min_confidence: Optional[str] = None  # LOW / MEDIUM / HIGH
+    min_prob_up: Optional[float] = None   # optional numeric filter (UP only)
 
 
+# -----------------------------
+# startup
+# -----------------------------
 @app.on_event("startup")
 def _startup():
     init_db()
@@ -330,11 +347,14 @@ def health():
     return {
         "status": "ok",
         "service": "worldmarketreviewer",
-        "version": "0.8.0",
+        "version": "0.9.0",
         "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
 
 
+# -----------------------------
+# education & configuration
+# -----------------------------
 @app.get("/api/data_sources")
 def data_sources():
     return {
@@ -358,9 +378,10 @@ def explain():
         "fields": {
             "direction": "UP means prob_up >= 0.50, DOWN means prob_up < 0.50.",
             "prob_up": "Probability (0–1) the price will be up after the horizon. Not a guarantee.",
+            "confidence": "LOW/MEDIUM/HIGH based on how far prob_up is from 0.50.",
+            "confidence_score": "0.0 is coin flip; 1.0 is extreme confidence (near 0 or 1).",
             "exp_return": "A simple proxy derived from prob_up. Educational only.",
             "horizon_days": "How many trading days ahead the prediction targets (e.g., 5).",
-            "source": "Where the price data came from (cache/yfinance), if provided.",
             "as_of_date": "The last price date used when generating that prediction.",
             "scoring": "Later, we check what actually happened after horizon_days and compute accuracy.",
         },
@@ -368,9 +389,17 @@ def explain():
             "Markets are uncertain. 100% accuracy is impossible.",
             "The goal is measurable edge + transparency, not certainty.",
         ],
+        "how_to_use_confidence": [
+            "Start with HIGH confidence only to reduce noise.",
+            "As you learn, expand to MEDIUM.",
+            "LOW is often too close to a coin flip.",
+        ],
     }
 
 
+# -----------------------------
+# static + misc
+# -----------------------------
 @app.get("/api/tickers")
 def tickers():
     return {"count": len(TICKERS), "tickers": TICKERS}
@@ -409,6 +438,9 @@ def debug_prices(ticker: str = "SPY", freq: str = "daily", lookback_days: int = 
     }
 
 
+# -----------------------------
+# sparklines
+# -----------------------------
 @app.get("/api/sparkline")
 def sparkline(ticker: str = "SPY", n: int = 60, lookback_days: int = 120, source_pref: str = "auto"):
     t = (ticker or "").upper().strip()
@@ -517,6 +549,9 @@ def sparklines(
     }
 
 
+# -----------------------------
+# manual verify
+# -----------------------------
 @app.get("/api/verify")
 def verify(
     ticker: str = "SPY",
@@ -582,12 +617,11 @@ def verify(
     }
 
 
+# -----------------------------
+# scoring + report cards
+# -----------------------------
 @app.post("/api/score_predictions")
 def score_predictions(limit: int = 200, max_parallel: int = 4, source_pref: str = "auto"):
-    """
-    Scores stored predictions that have as_of_date but haven't been scored yet.
-    It computes realized return after horizon_days trading days.
-    """
     limit = max(1, min(2000, int(limit)))
     max_parallel = max(1, min(16, int(max_parallel)))
 
@@ -596,7 +630,15 @@ def score_predictions(limit: int = 200, max_parallel: int = 4, source_pref: str 
         return {"ok": True, "note": "No unscored predictions found.", "requested": limit, "scored": 0}
 
     results: List[Dict[str, Any]] = []
-    counts: Dict[str, int] = {"scored": 0, "not_matured": 0, "missing_asof": 0, "no_data": 0, "no_close_col": 0, "asof_not_found": 0, "error": 0}
+    counts: Dict[str, int] = {
+        "scored": 0,
+        "not_matured": 0,
+        "missing_asof": 0,
+        "no_data": 0,
+        "no_close_col": 0,
+        "asof_not_found": 0,
+        "error": 0,
+    }
 
     def work(r: Dict[str, Any]):
         return _score_one_prediction_row(r, source_pref=source_pref)
@@ -638,7 +680,7 @@ def score_predictions(limit: int = 200, max_parallel: int = 4, source_pref: str 
         "fetched": len(rows),
         "counts": counts,
         "sample": results[: min(25, len(results))],
-        "note": "Use /api/metrics to see hit-rate and calibration once enough predictions mature.",
+        "note": "Use /api/report_card or /api/metrics once enough predictions mature.",
     }
 
 
@@ -649,22 +691,11 @@ def scoreboard(ticker: str = "SPY", horizon_days: int = 5, limit: int = 200):
     limit = max(1, min(2000, int(limit)))
 
     rows = get_scoreboard(t, horizon_days=horizon_days, limit=limit)
-    return {
-        "ticker": t,
-        "horizon_days": horizon_days,
-        "returned": len(rows),
-        "rows": rows,
-    }
+    return {"ticker": t, "horizon_days": horizon_days, "returned": len(rows), "rows": rows}
 
 
 @app.get("/api/metrics")
 def metrics(ticker: str = "SPY", horizon_days: int = 5, limit: int = 500):
-    """
-    Returns accuracy metrics for scored predictions:
-      - hit_rate: % where predicted direction matches realized_direction
-      - avg_realized_return
-      - calibration buckets of prob_up
-    """
     t = (ticker or "").upper().strip()
     horizon_days = max(1, min(60, int(horizon_days)))
     limit = max(10, min(5000, int(limit)))
@@ -688,7 +719,7 @@ def metrics(ticker: str = "SPY", horizon_days: int = 5, limit: int = 500):
         return {
             "ticker": t,
             "horizon_days": horizon_days,
-            "note": "No scored predictions yet. Run /api/score_predictions after some time passes.",
+            "note": "No scored predictions yet. Run POST /api/score_predictions after some time passes.",
             "count": 0,
         }
 
@@ -696,33 +727,33 @@ def metrics(ticker: str = "SPY", horizon_days: int = 5, limit: int = 500):
     ret_sum = 0.0
     ret_n = 0
 
-    # calibration buckets: [0.50-0.55), [0.55-0.60), ... [0.80-1.00]
-    bucket_edges = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 1.01]
-    buckets = []
-    for i in range(len(bucket_edges) - 1):
-        lo = bucket_edges[i]
-        hi = bucket_edges[i + 1]
-        buckets.append({"lo": lo, "hi": hi, "count": 0, "up_rate": None})
+    bucket_edges = [0.00, 0.10, 0.30, 1.01]  # LOW, MEDIUM, HIGH by confidence_score
+    buckets = [
+        {"label": "LOW", "lo": 0.00, "hi": 0.10, "count": 0, "hit_rate": None},
+        {"label": "MEDIUM", "lo": 0.10, "hi": 0.30, "count": 0, "hit_rate": None},
+        {"label": "HIGH", "lo": 0.30, "hi": 1.01, "count": 0, "hit_rate": None},
+    ]
 
     for prob, p_dir, r_dir, rr in scored:
-        if (p_dir == r_dir):
+        if p_dir == r_dir:
             hits += 1
         if rr is not None and math.isfinite(rr):
             ret_sum += rr
             ret_n += 1
-        # bucket by prob_up (only meaningful >=0.5 for "UP confidence")
+
+        cs = confidence_score(prob) or 0.0
         for b in buckets:
-            if prob >= b["lo"] and prob < b["hi"]:
+            if cs >= b["lo"] and cs < b["hi"]:
                 b["count"] += 1
-                b.setdefault("_up", 0)
-                if r_dir == "UP":
-                    b["_up"] += 1
+                b.setdefault("_hits", 0)
+                if p_dir == r_dir:
+                    b["_hits"] += 1
                 break
 
     for b in buckets:
         if b["count"] > 0:
-            b["up_rate"] = b["_up"] / b["count"]
-        b.pop("_up", None)
+            b["hit_rate"] = b["_hits"] / b["count"]
+        b.pop("_hits", None)
 
     return {
         "ticker": t,
@@ -730,14 +761,50 @@ def metrics(ticker: str = "SPY", horizon_days: int = 5, limit: int = 500):
         "count": len(scored),
         "hit_rate": hits / max(1, len(scored)),
         "avg_realized_return": (ret_sum / ret_n) if ret_n else None,
-        "calibration": buckets,
-        "note": (
-            "hit_rate is direction accuracy. calibration shows observed UP frequency by prob bucket. "
-            "More samples = more reliable."
-        ),
+        "by_confidence": buckets,
+        "note": "More samples = more reliable. HIGH confidence should usually have higher hit rate.",
     }
 
 
+@app.get("/api/report_card")
+def report_card(ticker: str = "SPY", horizon_days: int = 5, limit: int = 500):
+    """
+    A friendly summary for beginners.
+    """
+    t = (ticker or "").upper().strip()
+    horizon_days = max(1, min(60, int(horizon_days)))
+    limit = max(10, min(5000, int(limit)))
+
+    m = metrics(ticker=t, horizon_days=horizon_days, limit=limit)
+    if m.get("count", 0) == 0:
+        return m
+
+    hit = m.get("hit_rate")
+    by_conf = m.get("by_confidence") or []
+    best = None
+    for b in by_conf:
+        if b.get("label") == "HIGH":
+            best = b
+
+    return {
+        "ticker": t,
+        "horizon_days": horizon_days,
+        "samples": m.get("count"),
+        "overall_hit_rate": hit,
+        "avg_realized_return": m.get("avg_realized_return"),
+        "high_confidence": best,
+        "by_confidence": by_conf,
+        "how_to_read": [
+            "overall_hit_rate: how often UP/DOWN matched reality for scored predictions.",
+            "high_confidence: same metric but only when the model was far from 50/50.",
+            "If HIGH has low samples, wait for more predictions to mature.",
+        ],
+    }
+
+
+# -----------------------------
+# run_phase2
+# -----------------------------
 @app.post("/api/run_phase2")
 def run_phase2(req: PredictRequest):
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -783,6 +850,7 @@ def run_phase2(req: PredictRequest):
                 update_run_progress(run_id, completed)
 
     if results:
+        # DB insert will ignore extra keys (confidence fields) and store as_of_* via db.py
         insert_predictions(run_id, results)
 
     finish_run(run_id)
@@ -818,6 +886,20 @@ def run_status(run_id: str):
     }
 
 
+# -----------------------------
+# summary
+# -----------------------------
+def _confidence_rank(label: str) -> int:
+    lab = (label or "").upper().strip()
+    if lab == "HIGH":
+        return 3
+    if lab == "MEDIUM":
+        return 2
+    if lab == "LOW":
+        return 1
+    return 0
+
+
 @app.post("/api/summary")
 def summary_post(req: SummaryRequest):
     tickers_list = req.tickers or ["SPY", "QQQ", "IWM"]
@@ -828,13 +910,36 @@ def summary_post(req: SummaryRequest):
     base_weekly_move = float(req.base_weekly_move)
     retrain = bool(req.retrain)
 
+    min_conf = (req.min_confidence or "").upper().strip()
+    min_conf_rank = _confidence_rank(min_conf) if min_conf else 0
+    min_prob_up = req.min_prob_up
+    try:
+        min_prob_up = float(min_prob_up) if min_prob_up is not None else None
+    except Exception:
+        min_prob_up = None
+
     results: List[Dict[str, Any]] = []
     errors: Dict[str, str] = {}
+
+    def accept(p: Dict[str, Any]) -> bool:
+        # confidence filter (applies to both UP and DOWN; based on distance from 0.5)
+        if min_conf_rank > 0:
+            lab = (p.get("confidence") or "").upper().strip()
+            if _confidence_rank(lab) < min_conf_rank:
+                return False
+        # min_prob_up filter (UP-only filter; helps “show strong UP calls only”)
+        if min_prob_up is not None:
+            pu = clamp01(p.get("prob_up"))
+            if pu is None or pu < min_prob_up:
+                return False
+        return True
 
     if max_parallel == 1:
         for t in tickers_list:
             try:
-                results.append(_run_one_ticker(t, horizon_days, base_weekly_move, retrain=retrain))
+                p = _run_one_ticker(t, horizon_days, base_weekly_move, retrain=retrain)
+                if accept(p):
+                    results.append(p)
             except Exception as e:
                 errors[t] = str(e)
     else:
@@ -846,7 +951,9 @@ def summary_post(req: SummaryRequest):
             for fut in as_completed(futs):
                 t = futs[fut]
                 try:
-                    results.append(fut.result())
+                    p = fut.result()
+                    if accept(p):
+                        results.append(p)
                 except Exception as e:
                     errors[t] = str(e)
 
@@ -857,6 +964,8 @@ def summary_post(req: SummaryRequest):
         "horizon_days": horizon_days,
         "retrain": retrain,
         "count": len(results),
+        "min_confidence": min_conf or None,
+        "min_prob_up": min_prob_up,
         "predictions": results,
         "errors": errors,
     }
@@ -872,25 +981,26 @@ def summary(limit: int = 50, run_id: Optional[str] = None):
 
     preds = get_predictions_for_run(run_id, limit=max(1, int(limit)))
 
-    return {
-        "run_id": run_id,
-        "count_returned": len(preds),
-        "predictions": [
-            {
-                "id": p.get("id"),
-                "ticker": p.get("ticker"),
-                "source": p.get("source"),
-                "prob_up": json_safe(p.get("prob_up")),
-                "exp_return": json_safe(p.get("exp_return")),
-                "direction": p.get("direction"),
-                "horizon_days": p.get("horizon_days"),
-                "generated_at": p.get("generated_at"),
-                "as_of_date": p.get("as_of_date"),
-                "as_of_close": json_safe(p.get("as_of_close")),
-                "realized_return": json_safe(p.get("realized_return")),
-                "realized_direction": p.get("realized_direction"),
-                "scored_at": p.get("scored_at"),
-            }
-            for p in preds
-        ],
-    }
+    # add confidence computed from stored prob_up for display
+    out = []
+    for p in preds:
+        pu = clamp01(p.get("prob_up"))
+        out.append({
+            "id": p.get("id"),
+            "ticker": p.get("ticker"),
+            "source": p.get("source"),
+            "prob_up": json_safe(pu),
+            "exp_return": json_safe(p.get("exp_return")),
+            "direction": p.get("direction"),
+            "horizon_days": p.get("horizon_days"),
+            "generated_at": p.get("generated_at"),
+            "as_of_date": p.get("as_of_date"),
+            "as_of_close": json_safe(p.get("as_of_close")),
+            "realized_return": json_safe(p.get("realized_return")),
+            "realized_direction": p.get("realized_direction"),
+            "scored_at": p.get("scored_at"),
+            "confidence_score": json_safe(confidence_score(pu)),
+            "confidence": confidence_label(pu),
+        })
+
+    return {"run_id": run_id, "count_returned": len(out), "predictions": out}
