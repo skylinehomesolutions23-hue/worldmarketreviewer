@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 import psycopg2.extras
@@ -37,7 +37,14 @@ def init_db():
         exp_return DOUBLE PRECISION,
         direction TEXT,
         horizon_days INTEGER DEFAULT 5,
-        source TEXT
+        source TEXT,
+
+        -- scoring / verification fields
+        as_of_date TEXT,
+        as_of_close DOUBLE PRECISION,
+        realized_return DOUBLE PRECISION,
+        realized_direction TEXT,
+        scored_at TEXT
     );
     """)
 
@@ -56,6 +63,12 @@ def init_db():
     cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS source TEXT;")
     cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS horizon_days INTEGER DEFAULT 5;")
 
+    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS as_of_date TEXT;")
+    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS as_of_close DOUBLE PRECISION;")
+    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS realized_return DOUBLE PRECISION;")
+    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS realized_direction TEXT;")
+    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS scored_at TEXT;")
+
     cur.execute("""
     CREATE INDEX IF NOT EXISTS idx_predictions_run
     ON predictions(run_id);
@@ -66,12 +79,22 @@ def init_db():
     ON predictions(ticker, generated_at);
     """)
 
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_predictions_scoring
+    ON predictions(ticker, horizon_days, as_of_date);
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
 
 
 def insert_predictions(run_id: str, rows: List[Dict[str, Any]]):
+    """
+    rows may optionally include:
+      - as_of_date (str)
+      - as_of_close (float)
+    """
     conn = _connect()
     cur = conn.cursor()
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -87,13 +110,15 @@ def insert_predictions(run_id: str, rows: List[Dict[str, Any]]):
             r.get("direction"),
             int(r.get("horizon_days", 5)),
             r.get("source"),
+            r.get("as_of_date"),
+            r.get("as_of_close"),
         ))
 
     psycopg2.extras.execute_values(
         cur,
         """
         INSERT INTO predictions
-        (run_id, ticker, generated_at, prob_up, exp_return, direction, horizon_days, source)
+        (run_id, ticker, generated_at, prob_up, exp_return, direction, horizon_days, source, as_of_date, as_of_close)
         VALUES %s
         """,
         values
@@ -132,6 +157,73 @@ def get_predictions_for_run(run_id: str, limit: int = 200) -> List[Dict[str, Any
     ORDER BY id DESC
     LIMIT %s
     """, (run_id, int(limit)))
+
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
+def get_unscored_predictions(limit: int = 500) -> List[Dict[str, Any]]:
+    """
+    Returns predictions that have as_of_date but haven't been scored yet.
+    """
+    conn = _connect()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    cur.execute("""
+    SELECT *
+    FROM predictions
+    WHERE as_of_date IS NOT NULL
+      AND scored_at IS NULL
+    ORDER BY id ASC
+    LIMIT %s
+    """, (int(limit),))
+
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
+def set_prediction_score(pred_id: int, realized_return: Optional[float], realized_direction: Optional[str]):
+    conn = _connect()
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+    cur.execute("""
+    UPDATE predictions
+    SET realized_return = %s,
+        realized_direction = %s,
+        scored_at = %s
+    WHERE id = %s
+    """, (realized_return, realized_direction, now, int(pred_id)))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_scoreboard(ticker: str, horizon_days: int, limit: int = 200) -> List[Dict[str, Any]]:
+    """
+    Recent scored predictions for a ticker/horizon.
+    """
+    conn = _connect()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    cur.execute("""
+    SELECT
+      id, run_id, ticker, generated_at, horizon_days,
+      prob_up, direction, exp_return,
+      as_of_date, as_of_close,
+      realized_return, realized_direction, scored_at
+    FROM predictions
+    WHERE ticker = %s
+      AND horizon_days = %s
+      AND scored_at IS NOT NULL
+    ORDER BY id DESC
+    LIMIT %s
+    """, (ticker.upper().strip(), int(horizon_days), int(limit)))
 
     rows = [dict(r) for r in cur.fetchall()]
     cur.close()

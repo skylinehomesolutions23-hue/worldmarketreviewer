@@ -1,6 +1,6 @@
 import math
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -23,6 +23,10 @@ from db import (
     update_run_progress,
     finish_run,
     get_run_state,
+    # scoring additions
+    get_unscored_predictions,
+    set_prediction_score,
+    get_scoreboard,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -58,6 +62,19 @@ def compute_expected_return_from_prob(prob_up: float, base_move: float = 0.02) -
     return (2.0 * prob_up - 1.0) * float(base_move)
 
 
+def _to_date_key(s: str) -> str:
+    """
+    Normalize various datetime string formats to YYYY-MM-DD for matching.
+    """
+    s = (s or "").strip()
+    if not s:
+        return ""
+    # common: "2026-01-16 05:00:00+00:00" -> "2026-01-16"
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    return s
+
+
 def _load_prices(
     ticker: str,
     freq: str = "daily",
@@ -66,88 +83,46 @@ def _load_prices(
 ) -> Any:
     """
     Wrapper around load_stock_data that *tries* to respect a requested source.
-    Your current load_stock_data may not support this; if not, we fall back safely.
+    If your load_stock_data doesn't support source selection, we fall back safely.
 
     source_pref:
       - "auto" (default)
-      - "cache" / "yfinance" / "stooq" etc (only if your loader supports it)
+      - "cache" / "yfinance" (only if your loader supports it)
     """
     t = (ticker or "").upper().strip()
     source_pref = (source_pref or "auto").lower().strip()
 
-    # Try passing a source preference if the loader supports it.
     try:
         return load_stock_data(t, freq=freq, lookback_days=int(lookback_days), source=source_pref)
     except TypeError:
-        # Loader doesn't accept a "source" kwarg; ignore preference.
         return load_stock_data(t, freq=freq, lookback_days=int(lookback_days))
 
 
-def _run_one_ticker(
-    ticker: str,
-    horizon_days: int,
-    base_weekly_move: float,
-    retrain: bool = True,
-) -> Dict[str, Any]:
-    t = ticker.upper().strip()
+def _find_close_col(df) -> Optional[str]:
+    if df is None or getattr(df, "empty", True):
+        return None
 
-    df = _load_prices(t, freq="daily", lookback_days=365 * 6, source_pref="auto")
-    if df is None or len(df) < 30:
-        raise ValueError("Not enough data")
+    for c in ["close", "Close", "adj_close", "Adj Close", "adjclose", "AdjClose", "Price"]:
+        if c in df.columns:
+            return c
 
-    source = df.attrs.get("source", "unknown")
+    # last resort: first numeric-ish column
+    for c in df.columns:
+        try:
+            sample = df[c].dropna().iloc[:3].tolist()
+            if sample and all(isinstance(v, (int, float)) for v in sample):
+                return c
+        except Exception:
+            continue
 
-    df = build_features(df, horizon_days=horizon_days)
-    feature_cols = [c for c in df.columns if c not in ["target", "date"]]
-
-    probs = walk_forward_predict_proba(
-        df,
-        feature_cols=feature_cols,
-        target_col="target",
-        ticker=t,
-        horizon_days=horizon_days,
-        retrain=retrain,
-        lookback=252,
-        min_train=60,
-    )
-    prob_up = float(probs.iloc[-1])
-
-    exp_return = compute_expected_return_from_prob(prob_up, base_move=base_weekly_move)
-    direction = "UP" if prob_up >= 0.5 else "DOWN"
-
-    return {
-        "ticker": t,
-        "source": source,
-        "prob_up": json_safe(prob_up),
-        "exp_return": json_safe(exp_return),
-        "direction": direction,
-        "horizon_days": int(horizon_days),
-    }
+    return None
 
 
 def _sparkline_from_df(df, n: int) -> Dict[str, Any]:
-    """
-    Convert a price dataframe to sparkline-friendly arrays.
-    """
     if df is None or df.empty:
         return {"closes": [], "dates": [], "rows": 0, "source": "unknown"}
 
-    close_col = None
-    for c in ["close", "Close", "adj_close", "Adj Close", "adjclose", "AdjClose", "Price"]:
-        if c in df.columns:
-            close_col = c
-            break
-
-    if close_col is None:
-        for c in df.columns:
-            try:
-                sample = df[c].dropna().iloc[:3].tolist()
-                if sample and all(isinstance(v, (int, float)) for v in sample):
-                    close_col = c
-                    break
-            except Exception:
-                continue
-
+    close_col = _find_close_col(df)
     if close_col is None:
         return {
             "closes": [],
@@ -197,7 +172,6 @@ def _sparkline_from_df(df, n: int) -> Dict[str, Any]:
 
 
 def _pct_change(a: Optional[float], b: Optional[float]) -> Optional[float]:
-    # return (b/a - 1) if a is valid and non-zero
     try:
         if a is None or b is None:
             return None
@@ -208,6 +182,125 @@ def _pct_change(a: Optional[float], b: Optional[float]) -> Optional[float]:
         return b / a - 1.0
     except Exception:
         return None
+
+
+def _extract_as_of(df) -> Tuple[Optional[str], Optional[float], Optional[str]]:
+    """
+    Returns (as_of_date_str, as_of_close, close_col)
+    """
+    payload = _sparkline_from_df(df, n=3)
+    closes = payload.get("closes") or []
+    dates = payload.get("dates") or []
+    if not closes or not dates:
+        return None, None, payload.get("close_col")
+    return dates[-1], closes[-1], payload.get("close_col")
+
+
+def _run_one_ticker(
+    ticker: str,
+    horizon_days: int,
+    base_weekly_move: float,
+    retrain: bool = True,
+) -> Dict[str, Any]:
+    t = ticker.upper().strip()
+
+    df = _load_prices(t, freq="daily", lookback_days=365 * 6, source_pref="auto")
+    if df is None or len(df) < 30:
+        raise ValueError("Not enough data")
+
+    source = df.attrs.get("source", "unknown")
+
+    # Store as-of snapshot for later scoring
+    as_of_date, as_of_close, _ = _extract_as_of(df)
+
+    df_feat = build_features(df, horizon_days=horizon_days)
+    feature_cols = [c for c in df_feat.columns if c not in ["target", "date"]]
+
+    probs = walk_forward_predict_proba(
+        df_feat,
+        feature_cols=feature_cols,
+        target_col="target",
+        ticker=t,
+        horizon_days=horizon_days,
+        retrain=retrain,
+        lookback=252,
+        min_train=60,
+    )
+    prob_up = float(probs.iloc[-1])
+
+    exp_return = compute_expected_return_from_prob(prob_up, base_move=base_weekly_move)
+    direction = "UP" if prob_up >= 0.5 else "DOWN"
+
+    return {
+        "ticker": t,
+        "source": source,
+        "prob_up": json_safe(prob_up),
+        "exp_return": json_safe(exp_return),
+        "direction": direction,
+        "horizon_days": int(horizon_days),
+        "as_of_date": as_of_date,
+        "as_of_close": json_safe(as_of_close),
+    }
+
+
+def _score_one_prediction_row(row: Dict[str, Any], source_pref: str = "auto") -> Tuple[int, str, str, Optional[float], Optional[str], str]:
+    """
+    Returns: (id, ticker, as_of_date_key, realized_return, realized_direction, status)
+    status:
+      - "scored"
+      - "not_matured" (not enough future days yet)
+      - "missing_asof"
+      - "no_data"
+      - "no_close_col"
+      - "asof_not_found"
+    """
+    pred_id = int(row["id"])
+    ticker = (row.get("ticker") or "").upper().strip()
+    as_of_date = row.get("as_of_date") or ""
+    as_of_key = _to_date_key(str(as_of_date))
+    horizon_days = int(row.get("horizon_days") or 5)
+
+    if not ticker or not as_of_key:
+        return pred_id, ticker, as_of_key, None, None, "missing_asof"
+
+    df = _load_prices(ticker, freq="daily", lookback_days=365 * 6, source_pref=source_pref)
+    if df is None or getattr(df, "empty", True):
+        return pred_id, ticker, as_of_key, None, None, "no_data"
+
+    close_col = _find_close_col(df)
+    if close_col is None:
+        return pred_id, ticker, as_of_key, None, None, "no_close_col"
+
+    # Build normalized date keys for the index
+    try:
+        idx_strs = [str(x) for x in df.index]
+    except Exception:
+        return pred_id, ticker, as_of_key, None, None, "no_data"
+
+    idx_keys = [_to_date_key(s) for s in idx_strs]
+
+    try:
+        pos = idx_keys.index(as_of_key)
+    except ValueError:
+        # allow near-match: if as_of_key is not found, try last available date <= as_of_key (rare)
+        # (we keep it simple: fail)
+        return pred_id, ticker, as_of_key, None, None, "asof_not_found"
+
+    target_pos = pos + horizon_days
+    if target_pos >= len(df):
+        return pred_id, ticker, as_of_key, None, None, "not_matured"
+
+    try:
+        as_of_close = float(df.iloc[pos][close_col])
+        target_close = float(df.iloc[target_pos][close_col])
+        if not math.isfinite(as_of_close) or not math.isfinite(target_close) or as_of_close == 0.0:
+            return pred_id, ticker, as_of_key, None, None, "no_data"
+    except Exception:
+        return pred_id, ticker, as_of_key, None, None, "no_data"
+
+    realized_return = target_close / as_of_close - 1.0
+    realized_direction = "UP" if realized_return >= 0 else "DOWN"
+    return pred_id, ticker, as_of_key, realized_return, realized_direction, "scored"
 
 
 class PredictRequest(BaseModel):
@@ -237,57 +330,43 @@ def health():
     return {
         "status": "ok",
         "service": "worldmarketreviewer",
-        "version": "0.7.0",
+        "version": "0.8.0",
         "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
 
 
 @app.get("/api/data_sources")
 def data_sources():
-    """
-    Explains what we can/can't guarantee about data source selection.
-    NOTE: actual enforcement depends on load_stock_data implementation.
-    """
     return {
         "default": "auto",
         "supported_preferences": ["auto", "cache", "yfinance"],
         "note": (
-            "This API accepts source_pref on some endpoints. "
-            "If your load_stock_data implementation does not support source selection, "
-            "the server will ignore it and use its normal behavior."
+            "Some endpoints accept source_pref. If your load_stock_data does not support "
+            "explicit source selection, the server will ignore it and use its normal behavior."
         ),
     }
 
 
 @app.get("/api/explain")
 def explain():
-    """
-    Beginner-friendly glossary for what the app is doing.
-    """
     return {
         "what_this_app_does": (
-            "For each ticker, it downloads daily price history, builds features, "
-            "and uses a walk-forward RandomForest model to estimate the probability "
-            "the price will be higher after N days (horizon_days)."
+            "For each ticker, the backend downloads daily prices, builds features, and uses a "
+            "walk-forward RandomForest model to estimate the probability the price will be higher "
+            "after N trading days (horizon_days)."
         ),
         "fields": {
             "direction": "UP means prob_up >= 0.50, DOWN means prob_up < 0.50.",
-            "prob_up": "Model-estimated probability (0 to 1) that price will be up after the horizon.",
-            "exp_return": (
-                "A simple expected-return proxy derived from prob_up. "
-                "It is NOT a guarantee and not the same as a brokerage forecast."
-            ),
+            "prob_up": "Probability (0–1) the price will be up after the horizon. Not a guarantee.",
+            "exp_return": "A simple proxy derived from prob_up. Educational only.",
             "horizon_days": "How many trading days ahead the prediction targets (e.g., 5).",
-            "source": "Where price data came from (e.g., cache/yfinance), if provided by the loader.",
+            "source": "Where the price data came from (cache/yfinance), if provided.",
+            "as_of_date": "The last price date used when generating that prediction.",
+            "scoring": "Later, we check what actually happened after horizon_days and compute accuracy.",
         },
-        "how_to_use_it": [
-            "Treat prob_up as confidence, not certainty (0.55 is mild, 0.70 is stronger).",
-            "Compare multiple tickers; use sorting/filtering to focus on strongest signals.",
-            "Use /api/verify to manually sanity-check what prices have been doing recently.",
-        ],
         "important": [
-            "Predictions can be wrong. Markets are noisy.",
-            "This is educational tooling, not financial advice.",
+            "Markets are uncertain. 100% accuracy is impossible.",
+            "The goal is measurable edge + transparency, not certainty.",
         ],
     }
 
@@ -338,18 +417,11 @@ def sparkline(ticker: str = "SPY", n: int = 60, lookback_days: int = 120, source
 
     df = _load_prices(t, freq="daily", lookback_days=lookback_days, source_pref=source_pref)
     if df is None or df.empty:
-        return {
-            "ticker": t,
-            "n": n,
-            "closes": [],
-            "dates": [],
-            "ok": False,
-            "note": "No data returned by load_stock_data.",
-        }
+        return {"ticker": t, "n": n, "closes": [], "dates": [], "ok": False, "note": "No data returned."}
 
     payload = _sparkline_from_df(df, n=n)
-    closes = payload.get("closes", [])[-n:]
-    dates = payload.get("dates", [])[-n:]
+    closes = (payload.get("closes") or [])[-n:]
+    dates = (payload.get("dates") or [])[-n:]
 
     return {
         "ticker": t,
@@ -379,7 +451,6 @@ def sparklines(
         if t and t not in seen:
             seen.add(t)
             tickers_list.append(t)
-
     if not tickers_list:
         tickers_list = ["SPY", "QQQ"]
 
@@ -393,12 +464,12 @@ def sparklines(
     def one(t: str):
         df = _load_prices(t, freq="daily", lookback_days=lookback_days, source_pref=source_pref)
         if df is None or df.empty:
-            return t, None, "No data returned by load_stock_data."
+            return t, None, "No data."
         payload = _sparkline_from_df(df, n=n)
-        closes = payload.get("closes", [])[-n:]
-        dates = payload.get("dates", [])[-n:]
+        closes = (payload.get("closes") or [])[-n:]
+        dates = (payload.get("dates") or [])[-n:]
         if len(closes) < 2:
-            return t, None, "Not enough valid close values."
+            return t, None, "Not enough close values."
         out = {
             "ticker": t,
             "n": n,
@@ -454,13 +525,6 @@ def verify(
     lookback_days: int = 180,
     source_pref: str = "auto",
 ):
-    """
-    Manual sanity-check endpoint for beginners.
-
-    Returns recent closes + realized return over the last horizon_days.
-    This is NOT a stored backtest of the model prediction from that past date.
-    It simply answers: "What did price do over the last H days into today?"
-    """
     t = (ticker or "").upper().strip()
     horizon_days = max(1, min(60, int(horizon_days)))
     n = max(10, min(365, int(n)))
@@ -468,11 +532,11 @@ def verify(
 
     df = _load_prices(t, freq="daily", lookback_days=lookback_days, source_pref=source_pref)
     if df is None or df.empty:
-        return {"ticker": t, "ok": False, "note": "No data returned by load_stock_data."}
+        return {"ticker": t, "ok": False, "note": "No data returned."}
 
     payload = _sparkline_from_df(df, n=max(n, horizon_days + 2))
-    closes = payload.get("closes", [])
-    dates = payload.get("dates", [])
+    closes = payload.get("closes") or []
+    dates = payload.get("dates") or []
 
     if len(closes) < horizon_days + 2:
         return {
@@ -482,17 +546,16 @@ def verify(
             "rows": payload.get("rows", int(len(df))),
         }
 
-    # last move into today over horizon_days
     last_close = closes[-1]
     prev_close = closes[-2]
     start_h_close = closes[-(horizon_days + 1)]
 
     ret_1d = _pct_change(prev_close, last_close)
     ret_h = _pct_change(start_h_close, last_close)
+
     dir_1d = "UP" if (ret_1d is not None and ret_1d >= 0) else "DOWN"
     dir_h = "UP" if (ret_h is not None and ret_h >= 0) else "DOWN"
 
-    # return last n points for display
     closes_n = closes[-n:]
     dates_n = dates[-n:]
 
@@ -502,10 +565,7 @@ def verify(
         "horizon_days": horizon_days,
         "source": payload.get("source", df.attrs.get("source", "unknown")),
         "close_col": payload.get("close_col"),
-        "last": {
-            "close": last_close,
-            "date": dates[-1] if dates else "",
-        },
+        "last": {"close": last_close, "date": dates[-1] if dates else ""},
         "realized": {
             "return_1d": json_safe(ret_1d),
             "direction_1d": dir_1d,
@@ -514,14 +574,166 @@ def verify(
             "horizon_start_close": start_h_close,
             "horizon_start_date": dates[-(horizon_days + 1)] if dates else "",
         },
-        "series": {
-            "n": len(closes_n),
-            "closes": closes_n,
-            "dates": dates_n,
-        },
+        "series": {"n": len(closes_n), "closes": closes_n, "dates": dates_n},
         "note": (
             "This endpoint shows realized past returns into the most recent close. "
-            "It does not reconstruct what the model predicted on that past date unless you store predictions-by-date."
+            "For true accuracy, use /api/score_predictions + /api/metrics which score stored predictions."
+        ),
+    }
+
+
+@app.post("/api/score_predictions")
+def score_predictions(limit: int = 200, max_parallel: int = 4, source_pref: str = "auto"):
+    """
+    Scores stored predictions that have as_of_date but haven't been scored yet.
+    It computes realized return after horizon_days trading days.
+    """
+    limit = max(1, min(2000, int(limit)))
+    max_parallel = max(1, min(16, int(max_parallel)))
+
+    rows = get_unscored_predictions(limit=limit)
+    if not rows:
+        return {"ok": True, "note": "No unscored predictions found.", "requested": limit, "scored": 0}
+
+    results: List[Dict[str, Any]] = []
+    counts: Dict[str, int] = {"scored": 0, "not_matured": 0, "missing_asof": 0, "no_data": 0, "no_close_col": 0, "asof_not_found": 0, "error": 0}
+
+    def work(r: Dict[str, Any]):
+        return _score_one_prediction_row(r, source_pref=source_pref)
+
+    if max_parallel == 1 or len(rows) == 1:
+        items = []
+        for r in rows:
+            try:
+                items.append(work(r))
+            except Exception:
+                items.append((int(r["id"]), (r.get("ticker") or "").upper().strip(), _to_date_key(str(r.get("as_of_date") or "")), None, None, "error"))
+    else:
+        items = []
+        with ThreadPoolExecutor(max_workers=max_parallel) as ex:
+            futs = {ex.submit(work, r): r for r in rows}
+            for fut in as_completed(futs):
+                r = futs[fut]
+                try:
+                    items.append(fut.result())
+                except Exception:
+                    items.append((int(r["id"]), (r.get("ticker") or "").upper().strip(), _to_date_key(str(r.get("as_of_date") or "")), None, None, "error"))
+
+    for pred_id, ticker, asof_key, realized_return, realized_direction, status in items:
+        counts[status] = counts.get(status, 0) + 1
+        if status == "scored":
+            set_prediction_score(pred_id, float(realized_return), realized_direction)
+        results.append({
+            "id": pred_id,
+            "ticker": ticker,
+            "as_of_date": asof_key,
+            "realized_return": json_safe(realized_return),
+            "realized_direction": realized_direction,
+            "status": status,
+        })
+
+    return {
+        "ok": True,
+        "requested": limit,
+        "fetched": len(rows),
+        "counts": counts,
+        "sample": results[: min(25, len(results))],
+        "note": "Use /api/metrics to see hit-rate and calibration once enough predictions mature.",
+    }
+
+
+@app.get("/api/scoreboard")
+def scoreboard(ticker: str = "SPY", horizon_days: int = 5, limit: int = 200):
+    t = (ticker or "").upper().strip()
+    horizon_days = max(1, min(60, int(horizon_days)))
+    limit = max(1, min(2000, int(limit)))
+
+    rows = get_scoreboard(t, horizon_days=horizon_days, limit=limit)
+    return {
+        "ticker": t,
+        "horizon_days": horizon_days,
+        "returned": len(rows),
+        "rows": rows,
+    }
+
+
+@app.get("/api/metrics")
+def metrics(ticker: str = "SPY", horizon_days: int = 5, limit: int = 500):
+    """
+    Returns accuracy metrics for scored predictions:
+      - hit_rate: % where predicted direction matches realized_direction
+      - avg_realized_return
+      - calibration buckets of prob_up
+    """
+    t = (ticker or "").upper().strip()
+    horizon_days = max(1, min(60, int(horizon_days)))
+    limit = max(10, min(5000, int(limit)))
+
+    rows = get_scoreboard(t, horizon_days=horizon_days, limit=limit)
+
+    scored = []
+    for r in rows:
+        p_dir = (r.get("direction") or "").upper().strip()
+        r_dir = (r.get("realized_direction") or "").upper().strip()
+        prob = clamp01(r.get("prob_up"))
+        rr = r.get("realized_return")
+        try:
+            rr = float(rr) if rr is not None else None
+        except Exception:
+            rr = None
+        if p_dir in ("UP", "DOWN") and r_dir in ("UP", "DOWN") and prob is not None:
+            scored.append((prob, p_dir, r_dir, rr))
+
+    if not scored:
+        return {
+            "ticker": t,
+            "horizon_days": horizon_days,
+            "note": "No scored predictions yet. Run /api/score_predictions after some time passes.",
+            "count": 0,
+        }
+
+    hits = 0
+    ret_sum = 0.0
+    ret_n = 0
+
+    # calibration buckets: [0.50-0.55), [0.55-0.60), ... [0.80-1.00]
+    bucket_edges = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 1.01]
+    buckets = []
+    for i in range(len(bucket_edges) - 1):
+        lo = bucket_edges[i]
+        hi = bucket_edges[i + 1]
+        buckets.append({"lo": lo, "hi": hi, "count": 0, "up_rate": None})
+
+    for prob, p_dir, r_dir, rr in scored:
+        if (p_dir == r_dir):
+            hits += 1
+        if rr is not None and math.isfinite(rr):
+            ret_sum += rr
+            ret_n += 1
+        # bucket by prob_up (only meaningful >=0.5 for "UP confidence")
+        for b in buckets:
+            if prob >= b["lo"] and prob < b["hi"]:
+                b["count"] += 1
+                b.setdefault("_up", 0)
+                if r_dir == "UP":
+                    b["_up"] += 1
+                break
+
+    for b in buckets:
+        if b["count"] > 0:
+            b["up_rate"] = b["_up"] / b["count"]
+        b.pop("_up", None)
+
+    return {
+        "ticker": t,
+        "horizon_days": horizon_days,
+        "count": len(scored),
+        "hit_rate": hits / max(1, len(scored)),
+        "avg_realized_return": (ret_sum / ret_n) if ret_n else None,
+        "calibration": buckets,
+        "note": (
+            "hit_rate is direction accuracy. calibration shows observed UP frequency by prob bucket. "
+            "More samples = more reliable."
         ),
     }
 
@@ -665,6 +877,7 @@ def summary(limit: int = 50, run_id: Optional[str] = None):
         "count_returned": len(preds),
         "predictions": [
             {
+                "id": p.get("id"),
                 "ticker": p.get("ticker"),
                 "source": p.get("source"),
                 "prob_up": json_safe(p.get("prob_up")),
@@ -672,6 +885,11 @@ def summary(limit: int = 50, run_id: Optional[str] = None):
                 "direction": p.get("direction"),
                 "horizon_days": p.get("horizon_days"),
                 "generated_at": p.get("generated_at"),
+                "as_of_date": p.get("as_of_date"),
+                "as_of_close": json_safe(p.get("as_of_close")),
+                "realized_return": json_safe(p.get("realized_return")),
+                "realized_direction": p.get("realized_direction"),
+                "scored_at": p.get("scored_at"),
             }
             for p in preds
         ],
