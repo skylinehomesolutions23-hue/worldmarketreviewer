@@ -30,6 +30,7 @@ backup_csv/
 runs/
 
 # Data outputs (generated)
+data/
 data/*.csv
 data/*.db
 data/results/
