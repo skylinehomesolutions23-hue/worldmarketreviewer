@@ -59,3 +59,11 @@ yarn-error.log*
 # Android / iOS build artifacts (future-proof)
 android/
 ios/
+
+# Local helper / one-off scripts (not part of deployed app)
+fix_csv_headers.py
+phase2_launcher.py
+phase2_pro_runner.py
+run_phase2_parallel.py
+rerun_phase2_pro.ps1.py
+main
