@@ -37,3 +37,24 @@ data/backup_csv/
 data/monthly/
 data/latest_summary.json
 data/mobile_summary.csv
+
+# =========================
+# Expo / React Native
+# =========================
+node_modules/
+.expo/
+.expo-shared/
+web-build/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Expo env
+.env.local
+.env.development
+.env.production
+
+# Android / iOS build artifacts (future-proof)
+android/
+ios/
