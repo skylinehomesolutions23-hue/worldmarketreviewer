@@ -1,4 +1,3 @@
-# api.py
 import math
 from datetime import datetime
 from typing import List, Optional, Dict, Any
@@ -118,9 +117,14 @@ def health():
     return {
         "status": "ok",
         "service": "worldmarketreviewer",
-        "version": "0.4.6",
+        "version": "0.5.0",
         "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
+
+
+@app.get("/api/tickers")
+def tickers():
+    return {"count": len(TICKERS), "tickers": TICKERS}
 
 
 @app.get("/app", response_class=HTMLResponse)
@@ -159,22 +163,25 @@ def debug_prices(ticker: str = "SPY", freq: str = "daily", lookback_days: int = 
 def run_phase2(req: PredictRequest):
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
-    tickers = TICKERS if req.all or not req.tickers else [
+    tickers_list = TICKERS if req.all or not req.tickers else [
         t.upper().strip() for t in req.tickers if t and t.strip()
     ]
 
-    create_run(run_id, total=len(tickers))
+    max_parallel = max(1, int(req.max_parallel))
+    horizon_days = int(req.horizon_days)
+    base_weekly_move = float(req.base_weekly_move)
+    retrain = bool(req.retrain)
+
+    create_run(run_id, total=len(tickers_list))
 
     results: List[Dict[str, Any]] = []
     errors: Dict[str, str] = {}
     completed = 0
 
-    max_parallel = max(1, int(req.max_parallel))
-
     if max_parallel == 1:
-        for t in tickers:
+        for t in tickers_list:
             try:
-                results.append(_run_one_ticker(t, req.horizon_days, req.base_weekly_move, retrain=req.retrain))
+                results.append(_run_one_ticker(t, horizon_days, base_weekly_move, retrain=retrain))
             except Exception as e:
                 errors[t] = str(e)
             completed += 1
@@ -182,8 +189,8 @@ def run_phase2(req: PredictRequest):
     else:
         with ThreadPoolExecutor(max_workers=max_parallel) as ex:
             futs = {
-                ex.submit(_run_one_ticker, t, req.horizon_days, req.base_weekly_move, req.retrain): t
-                for t in tickers
+                ex.submit(_run_one_ticker, t, horizon_days, base_weekly_move, retrain): t
+                for t in tickers_list
             }
             for fut in as_completed(futs):
                 t = futs[fut]
@@ -203,9 +210,11 @@ def run_phase2(req: PredictRequest):
         "run_id": run_id,
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "status": "started",
-        "total": len(tickers),
+        "total": len(tickers_list),
         "stored": len(results),
         "errors": errors,
+        "horizon_days": horizon_days,
+        "retrain": retrain,
     }
 
 
@@ -230,25 +239,45 @@ def run_status(run_id: str):
 
 @app.post("/api/summary")
 def summary_post(req: SummaryRequest):
-    tickers = req.tickers or ["SPY", "QQQ", "IWM"]
-    tickers = [t.upper().strip() for t in tickers if t and t.strip()]
+    tickers_list = req.tickers or ["SPY", "QQQ", "IWM"]
+    tickers_list = [t.upper().strip() for t in tickers_list if t and t.strip()]
+
+    max_parallel = max(1, int(req.max_parallel))
+    horizon_days = int(req.horizon_days)
+    base_weekly_move = float(req.base_weekly_move)
+    retrain = bool(req.retrain)
 
     results: List[Dict[str, Any]] = []
     errors: Dict[str, str] = {}
 
-    for t in tickers:
-        try:
-            results.append(_run_one_ticker(t, req.horizon_days, req.base_weekly_move, retrain=req.retrain))
-        except Exception as e:
-            errors[t] = str(e)
+    if max_parallel == 1:
+        for t in tickers_list:
+            try:
+                results.append(_run_one_ticker(t, horizon_days, base_weekly_move, retrain=retrain))
+            except Exception as e:
+                errors[t] = str(e)
+    else:
+        with ThreadPoolExecutor(max_workers=max_parallel) as ex:
+            futs = {
+                ex.submit(_run_one_ticker, t, horizon_days, base_weekly_move, retrain): t
+                for t in tickers_list
+            }
+            for fut in as_completed(futs):
+                t = futs[fut]
+                try:
+                    results.append(fut.result())
+                except Exception as e:
+                    errors[t] = str(e)
 
     return {
         "run_id": f"LIVE_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "tickers": tickers_list,
+        "horizon_days": horizon_days,
+        "retrain": retrain,
+        "count": len(results),
         "predictions": results,
         "errors": errors,
-        "horizon_days": int(req.horizon_days),
-        "retrain": bool(req.retrain),
     }
 
 
@@ -268,12 +297,11 @@ def summary(limit: int = 50, run_id: Optional[str] = None):
         "predictions": [
             {
                 "ticker": p.get("ticker"),
+                "source": p.get("source"),
                 "prob_up": json_safe(p.get("prob_up")),
                 "exp_return": json_safe(p.get("exp_return")),
                 "direction": p.get("direction"),
                 "horizon_days": p.get("horizon_days"),
-                # If you later add a DB column for source, this will show too:
-                "source": p.get("source"),
                 "generated_at": p.get("generated_at"),
             }
             for p in preds

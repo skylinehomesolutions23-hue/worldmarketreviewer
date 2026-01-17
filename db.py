@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional
 import psycopg2
 import psycopg2.extras
 
-# Supabase connection string should be stored in env var DATABASE_URL
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 
@@ -18,13 +17,12 @@ def _require_db_url():
 
 def _connect():
     _require_db_url()
-    # psycopg2 handles sslmode=require in the URL
     return psycopg2.connect(DATABASE_URL)
 
 
 def init_db():
     """
-    Create tables if they don't exist.
+    Create tables if they don't exist. Also adds new columns if missing.
     """
     conn = _connect()
     cur = conn.cursor()
@@ -38,7 +36,8 @@ def init_db():
         prob_up DOUBLE PRECISION,
         exp_return DOUBLE PRECISION,
         direction TEXT,
-        horizon_days INTEGER DEFAULT 5
+        horizon_days INTEGER DEFAULT 5,
+        source TEXT
     );
     """)
 
@@ -52,6 +51,10 @@ def init_db():
         finished_at TEXT
     );
     """)
+
+    # Add missing columns safely (older DBs)
+    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS source TEXT;")
+    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS horizon_days INTEGER DEFAULT 5;")
 
     cur.execute("""
     CREATE INDEX IF NOT EXISTS idx_predictions_run
@@ -68,8 +71,6 @@ def init_db():
     conn.close()
 
 
-# ---------- prediction storage ----------
-
 def insert_predictions(run_id: str, rows: List[Dict[str, Any]]):
     conn = _connect()
     cur = conn.cursor()
@@ -85,13 +86,14 @@ def insert_predictions(run_id: str, rows: List[Dict[str, Any]]):
             r.get("exp_return"),
             r.get("direction"),
             int(r.get("horizon_days", 5)),
+            r.get("source"),
         ))
 
     psycopg2.extras.execute_values(
         cur,
         """
         INSERT INTO predictions
-        (run_id, ticker, generated_at, prob_up, exp_return, direction, horizon_days)
+        (run_id, ticker, generated_at, prob_up, exp_return, direction, horizon_days, source)
         VALUES %s
         """,
         values
@@ -136,8 +138,6 @@ def get_predictions_for_run(run_id: str, limit: int = 200) -> List[Dict[str, Any
     conn.close()
     return rows
 
-
-# ---------- run state tracking ----------
 
 def create_run(run_id: str, total: int):
     conn = _connect()
