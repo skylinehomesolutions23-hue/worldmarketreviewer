@@ -1,3 +1,4 @@
+// mobile-expo/app/(tabs)/index.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -122,7 +123,7 @@ function confRank(label: any): number {
 
 function confLabelFromProb(probUp: number | null): "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN" {
   if (probUp === null) return "UNKNOWN";
-  const p = Math.abs(probUp - 0.5); // distance from coinflip
+  const p = Math.abs(probUp - 0.5);
   if (p >= 0.20) return "HIGH";
   if (p >= 0.10) return "MEDIUM";
   if (p >= 0.00) return "LOW";
@@ -355,7 +356,6 @@ export default function HomeScreen() {
   }
 
   function applyRecentKey(key: string) {
-    // format: CSV|h=5|r=1
     const [csv, hPart, rPart] = key.split("|");
     const h = Number((hPart || "").replace("h=", ""));
     const r = (rPart || "").replace("r=", "") === "1";
@@ -378,7 +378,8 @@ export default function HomeScreen() {
           prob_up: prob,
           exp_return: typeof p.exp_return === "number" ? p.exp_return : Number(p.exp_return),
           confidence: (p.confidence ? String(p.confidence).toUpperCase() : computedLabel) as any,
-          confidence_score: p.confidence_score ?? (prob === null ? null : Math.abs(prob - 0.5)),
+          // FIX: match backend confidence_score (0..1)
+          confidence_score: p.confidence_score ?? (prob === null ? null : Math.abs(prob - 0.5) * 2),
         };
       })
       .filter((p) => p.ticker);
@@ -400,7 +401,6 @@ export default function HomeScreen() {
     } else if (sortMode === "EXP_DESC") {
       arr.sort((a, b) => (Number(b.exp_return) || -999) - (Number(a.exp_return) || -999));
     } else {
-      // PROB_DESC: tie-breaker by confidence label
       arr.sort((a, b) => {
         const pb = Number(b.prob_up);
         const pa = Number(a.prob_up);
@@ -504,10 +504,7 @@ export default function HomeScreen() {
           )}
 
           <View style={styles.row}>
-            <Pressable
-              onPress={() => openUrl(`${API_BASE}/api/explain`)}
-              style={styles.linkButton}
-            >
+            <Pressable onPress={() => openUrl(`${API_BASE}/api/explain`)} style={styles.linkButton}>
               <Text style={styles.linkButtonText}>What am I looking at?</Text>
             </Pressable>
           </View>
@@ -542,10 +539,7 @@ export default function HomeScreen() {
               <Text style={styles.smallButtonText}>Save first ticker</Text>
             </Pressable>
 
-            <Pressable
-              onPress={() => applyTickerCSV(DEFAULT_TICKERS.join(", "))}
-              style={styles.smallButton}
-            >
+            <Pressable onPress={() => applyTickerCSV(DEFAULT_TICKERS.join(", "))} style={styles.smallButton}>
               <Text style={styles.smallButtonText}>Defaults</Text>
             </Pressable>
           </View>
@@ -602,8 +596,7 @@ export default function HomeScreen() {
                   <View style={styles.row}>
                     <Pressable
                       onPress={() => {
-                        const next: DirectionFilter =
-                          filter === "ALL" ? "UP" : filter === "UP" ? "DOWN" : "ALL";
+                        const next: DirectionFilter = filter === "ALL" ? "UP" : filter === "UP" ? "DOWN" : "ALL";
                         setFilter(next);
                         persist(STORAGE_KEYS.lastFilter, next);
                       }}
@@ -626,7 +619,8 @@ export default function HomeScreen() {
                       style={styles.smallButton}
                     >
                       <Text style={styles.smallButtonText}>
-                        Sort: {sortMode === "PROB_DESC" ? "Prob ↓" : sortMode === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}
+                        Sort:{" "}
+                        {sortMode === "PROB_DESC" ? "Prob ↓" : sortMode === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}
                       </Text>
                     </Pressable>
 
@@ -719,14 +713,26 @@ function ResultCard({ p }: { p: PredRow }) {
 
       <View style={styles.row}>
         <Pressable
-          onPress={() => openUrl(`${API_BASE}/api/verify?ticker=${encodeURIComponent(ticker)}&horizon_days=${encodeURIComponent(String(p.horizon_days ?? 5))}`)}
+          onPress={() =>
+            openUrl(
+              `${API_BASE}/api/verify?ticker=${encodeURIComponent(ticker)}&horizon_days=${encodeURIComponent(
+                String(p.horizon_days ?? 5)
+              )}`
+            )
+          }
           style={styles.linkPill}
         >
           <Text style={styles.linkPillText}>Verify</Text>
         </Pressable>
 
         <Pressable
-          onPress={() => openUrl(`${API_BASE}/api/metrics?ticker=${encodeURIComponent(ticker)}&horizon_days=${encodeURIComponent(String(p.horizon_days ?? 5))}`)}
+          onPress={() =>
+            openUrl(
+              `${API_BASE}/api/report_card?ticker=${encodeURIComponent(ticker)}&horizon_days=${encodeURIComponent(
+                String(p.horizon_days ?? 5)
+              )}`
+            )
+          }
           style={styles.linkPill}
         >
           <Text style={styles.linkPillText}>Report card</Text>

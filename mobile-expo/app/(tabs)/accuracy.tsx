@@ -1,3 +1,4 @@
+// mobile-expo/app/(tabs)/accuracy.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -17,6 +18,8 @@ const STORAGE_KEYS = {
   savedTickers: "wmr:savedTickers:v3",
   lastTickersInput: "wmr:lastTickersInput:v3",
   lastHorizon: "wmr:lastHorizon:v3",
+  // NEW: local cooldown for "Score now"
+  lastScoreTapUtc: "wmr:lastScoreTapUtc:v1",
 };
 
 type MetricsResponse = {
@@ -25,7 +28,13 @@ type MetricsResponse = {
   count?: number;
   hit_rate?: number;
   avg_realized_return?: number | null;
+
+  // old API shape (if you ever switch back)
   calibration?: { lo: number; hi: number; count: number; up_rate: number | null }[];
+
+  // new API shape (your current api.py)
+  by_confidence?: { label: string; lo: number; hi: number; count: number; hit_rate: number | null }[];
+
   note?: string;
   [k: string]: any;
 };
@@ -54,12 +63,6 @@ function fmtPct(x: any, digits = 1): string {
   return `${(n * 100).toFixed(digits)}%`;
 }
 
-function fmtNum(x: any, digits = 4): string {
-  const n = typeof x === "number" ? x : Number(x);
-  if (!Number.isFinite(n)) return "-";
-  return n.toFixed(digits);
-}
-
 async function safeJson(res: Response) {
   const txt = await res.text();
   try {
@@ -67,6 +70,10 @@ async function safeJson(res: Response) {
   } catch {
     return { raw: txt };
   }
+}
+
+function nowUtcMs(): number {
+  return Date.now();
 }
 
 export default function AccuracyScreen() {
@@ -81,6 +88,8 @@ export default function AccuracyScreen() {
   const [loadingScore, setLoadingScore] = useState<boolean>(false);
   const [scoreResp, setScoreResp] = useState<ScoreResponse | null>(null);
 
+  const [cooldownLeftSec, setCooldownLeftSec] = useState<number>(0);
+
   useEffect(() => {
     (async () => {
       try {
@@ -92,7 +101,9 @@ export default function AccuracyScreen() {
 
         if (saved) {
           const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed) && parsed.length) setSavedTickers(parsed.map(String).map((x) => x.toUpperCase()));
+          if (Array.isArray(parsed) && parsed.length) {
+            setSavedTickers(parsed.map(String).map((x) => x.toUpperCase()));
+          }
         }
 
         const fromInput = lastInput ? normalizeTickers(String(lastInput)) : [];
@@ -125,21 +136,15 @@ export default function AccuracyScreen() {
     setMetricsErr("");
 
     try {
-      const url = `${API_BASE}/api/metrics?ticker=${encodeURIComponent(t)}&horizon_days=${encodeURIComponent(
-        String(hd)
-      )}&limit=500`;
+      const url = `${API_BASE}/api/metrics?ticker=${encodeURIComponent(
+        t
+      )}&horizon_days=${encodeURIComponent(String(hd))}&limit=500`;
 
       const res = await fetch(url);
       const data = (await safeJson(res)) as MetricsResponse;
 
       if (!res.ok) {
         setMetricsErr(`HTTP ${res.status}: ${JSON.stringify(data).slice(0, 300)}`);
-        return;
-      }
-
-      if (data?.note && !data?.hit_rate) {
-        // backend returns a note when no scored predictions exist
-        setMetrics(data);
         return;
       }
 
@@ -151,11 +156,47 @@ export default function AccuracyScreen() {
     }
   }
 
+  // Cooldown: 30 minutes
+  const SCORE_COOLDOWN_MS = 30 * 60 * 1000;
+
+  async function checkCooldown(): Promise<boolean> {
+    try {
+      const last = await AsyncStorage.getItem(STORAGE_KEYS.lastScoreTapUtc);
+      const lastMs = last ? Number(last) : 0;
+      const now = nowUtcMs();
+      const diff = now - (Number.isFinite(lastMs) ? lastMs : 0);
+      if (diff < SCORE_COOLDOWN_MS) {
+        const left = Math.ceil((SCORE_COOLDOWN_MS - diff) / 1000);
+        setCooldownLeftSec(left);
+        Alert.alert(
+          "Please wait",
+          `To avoid hammering the free backend, you can score again in ~${Math.ceil(left / 60)} min.`
+        );
+        return false;
+      }
+      return true;
+    } catch {
+      return true;
+    }
+  }
+
+  async function stampCooldown() {
+    try {
+      await AsyncStorage.setItem(STORAGE_KEYS.lastScoreTapUtc, String(nowUtcMs()));
+      setCooldownLeftSec(0);
+    } catch {}
+  }
+
   async function scoreNow() {
+    const ok = await checkCooldown();
+    if (!ok) return;
+
     setLoadingScore(true);
     setScoreResp(null);
 
     try {
+      await stampCooldown();
+
       const res = await fetch(`${API_BASE}/api/score_predictions?limit=500&max_parallel=4`, {
         method: "POST",
       });
@@ -166,7 +207,6 @@ export default function AccuracyScreen() {
       if (!res.ok) {
         Alert.alert("Score failed", `HTTP ${res.status}`);
       } else {
-        // refresh metrics after scoring attempt
         await fetchMetrics();
       }
     } catch (e: any) {
@@ -177,7 +217,7 @@ export default function AccuracyScreen() {
   }
 
   useEffect(() => {
-    // auto-load metrics when entering this tab the first time
+    // auto-load metrics on first enter
     fetchMetrics().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -187,7 +227,7 @@ export default function AccuracyScreen() {
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>Accuracy Report Card</Text>
         <Text style={styles.subtitle}>
-          This scores past predictions after the horizon passes. More samples = more reliable.
+          Scores past predictions after the horizon passes. More samples = more reliable.
         </Text>
 
         <View style={styles.card}>
@@ -217,17 +257,21 @@ export default function AccuracyScreen() {
               <Text style={styles.buttonText}>{loadingMetrics ? "Loading..." : "Load metrics"}</Text>
             </Pressable>
 
-            <Pressable
-              onPress={scoreNow}
-              style={[styles.smallButton, styles.scoreButton]}
-            >
+            <Pressable onPress={scoreNow} style={[styles.smallButton, styles.scoreButton]}>
               <Text style={styles.smallButtonText}>{loadingScore ? "Scoring..." : "Score now"}</Text>
             </Pressable>
           </View>
 
           <Text style={styles.hint}>
-            Tip: If metrics say “No scored predictions yet,” run the app daily for a bit, then tap “Score now.”
+            Beginner note: “Hit rate” = how often UP/DOWN was correct after{" "}
+            <Text style={styles.bold}>{horizonDays} trading days</Text>.
           </Text>
+
+          {cooldownLeftSec > 0 ? (
+            <Text style={styles.mutedSmall}>
+              Score cooldown: ~{Math.ceil(cooldownLeftSec / 60)} min remaining
+            </Text>
+          ) : null}
 
           <View style={styles.chipsWrap}>
             {quickTickers.map((t) => (
@@ -278,8 +322,17 @@ export default function AccuracyScreen() {
                 </View>
               </View>
 
-              <Text style={styles.sectionSubtitle}>Calibration (how often UP actually happened)</Text>
-              {Array.isArray(metrics.calibration) && metrics.calibration.length ? (
+              <Text style={styles.sectionSubtitle}>By confidence</Text>
+
+              {Array.isArray(metrics.by_confidence) && metrics.by_confidence.length ? (
+                metrics.by_confidence.map((b, idx) => (
+                  <View key={idx} style={styles.calRow}>
+                    <Text style={styles.calLeft}>{b.label}</Text>
+                    <Text style={styles.calMid}>n={b.count}</Text>
+                    <Text style={styles.calRight}>{b.hit_rate == null ? "-" : fmtPct(b.hit_rate, 0)}</Text>
+                  </View>
+                ))
+              ) : Array.isArray(metrics.calibration) && metrics.calibration.length ? (
                 metrics.calibration.map((b, idx) => (
                   <View key={idx} style={styles.calRow}>
                     <Text style={styles.calLeft}>
@@ -290,7 +343,7 @@ export default function AccuracyScreen() {
                   </View>
                 ))
               ) : (
-                <Text style={styles.muted}>No calibration buckets yet.</Text>
+                <Text style={styles.muted}>No buckets yet.</Text>
               )}
 
               {metrics.note ? <Text style={styles.hint}>{metrics.note}</Text> : null}
@@ -307,10 +360,7 @@ export default function AccuracyScreen() {
               <Text style={styles.meta}>ok: {String(scoreResp.ok)}</Text>
               <Text style={styles.meta}>fetched: {String(scoreResp.fetched ?? "-")}</Text>
               <Text style={styles.meta}>
-                counts:{" "}
-                <Text style={styles.monoSmall}>
-                  {JSON.stringify(scoreResp.counts || {}, null, 0)}
-                </Text>
+                counts: <Text style={styles.monoSmall}>{JSON.stringify(scoreResp.counts || {}, null, 0)}</Text>
               </Text>
               {scoreResp.note ? <Text style={styles.hint}>{scoreResp.note}</Text> : null}
             </>
@@ -318,7 +368,7 @@ export default function AccuracyScreen() {
         </View>
 
         <Text style={styles.footerNote}>
-          Beginner note: “Hit rate” is just direction accuracy (UP vs DOWN). Even strong models won’t be 100%.
+          Reminder: Even strong models won’t be 100%. You’re building transparency + measurable edge.
         </Text>
       </ScrollView>
     </View>
@@ -330,6 +380,7 @@ const styles = StyleSheet.create({
   container: { padding: 16, paddingBottom: 40 },
   title: { color: "#FFFFFF", fontSize: 22, fontWeight: "900" },
   subtitle: { color: "#A7B0C0", marginTop: 6, marginBottom: 12, lineHeight: 18 },
+  bold: { color: "#E5E7EB", fontWeight: "900" },
 
   card: {
     backgroundColor: "#111A2E",
@@ -369,7 +420,7 @@ const styles = StyleSheet.create({
   smallButtonText: { color: "#E5E7EB", fontWeight: "800" },
 
   hint: { color: "#A7B0C0", marginTop: 10, lineHeight: 18 },
-
+  mutedSmall: { color: "#A7B0C0", fontSize: 12, marginTop: 8 },
   chipsWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
   chip: {
     backgroundColor: "#0B1220",
