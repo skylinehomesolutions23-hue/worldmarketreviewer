@@ -11,8 +11,8 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 MONTHLY_PRICES_FILE = os.path.join(DATA_DIR, "monthly_prices.csv")
 
 # Cache freshness settings (tune as you want)
-CACHE_TTL_HOURS_DAILY = 24   # only refetch daily once per day
-CACHE_TTL_HOURS_MONTHLY = 24 * 7  # monthly cache ~weekly
+CACHE_TTL_HOURS_DAILY = 24          # only refetch daily once per day
+CACHE_TTL_HOURS_MONTHLY = 24 * 7    # monthly cache ~weekly
 
 
 def _detect_columns(df: pd.DataFrame):
@@ -86,14 +86,9 @@ def _cache_path(ticker: str, freq: str) -> str:
 
 
 def _is_cache_fresh(df: pd.DataFrame, ttl_hours: int) -> bool:
-    """
-    Cache is considered fresh if it has a fetched_at_utc column and
-    the newest fetched_at_utc is within ttl_hours.
-    """
     if df is None or df.empty:
         return False
     if "fetched_at_utc" not in df.columns:
-        # older cache format -> treat as stale but usable
         return False
 
     try:
@@ -130,7 +125,6 @@ def _save_cached_prices(ticker: str, freq: str, df: pd.DataFrame) -> None:
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         out = df.copy()
-        # Stamp fetch time (UTC) so TTL works
         out["fetched_at_utc"] = pd.Timestamp.utcnow().tz_localize("UTC").isoformat()
         path = _cache_path(ticker, freq)
         out.to_csv(path, index=False)
@@ -180,53 +174,69 @@ def load_stock_data(
     ticker: str,
     lookback_days: int | None = None,
     freq: str = "daily",
+    source: str = "auto",   # <-- NEW: allow api.py to pass source preference
 ) -> pd.DataFrame | None:
     """
     Returns DataFrame indexed by UTC datetime with column ['Price'].
-    df.attrs['source'] will be: 'cache' | 'cache_stale' | 'yfinance' | 'stooq' | 'monthly_prices.csv'
+
+    source:
+      - "auto": cache-first, then live, fallback to stale cache
+      - "cache": cache-only (fresh or stale); if no cache, returns None
+      - "yfinance": live-first (still uses your internal provider selection), fallback to cache
+
+    df.attrs['source'] will be:
+      'cache' | 'cache_stale' | provider string from market_data | 'monthly_prices.csv'
     """
     t = ticker.upper().strip()
     os.makedirs(DATA_DIR, exist_ok=True)
 
     freq = (freq or "daily").lower().strip()
+    source = (source or "auto").lower().strip()
 
     ttl = CACHE_TTL_HOURS_DAILY if freq == "daily" else CACHE_TTL_HOURS_MONTHLY
 
-    # 1) cache
+    # Load cache (if exists)
     cached = _load_cached_prices(t, freq)
+    out_cached = None
+    fresh = False
     if cached is not None and not cached.empty:
         fresh = _is_cache_fresh(cached, ttl_hours=ttl)
         out_cached = cached.set_index("date")[["price"]].rename(columns={"price": "Price"})
         out_cached.attrs["source"] = "cache" if fresh else "cache_stale"
 
-        # If cache is fresh, return immediately (prevents yfinance rate limits)
-        if fresh:
-            out = out_cached
-        else:
-            out = None
+    # Source=cache: return cache-only (fresh OR stale). If none, return None.
+    if source == "cache":
+        out = out_cached
+        if out is None or out.empty:
+            return None
     else:
         out = None
-        out_cached = None
 
-    # 2) optional monthly csv for dev
-    if out is None and freq == "monthly":
-        out = _load_from_monthly_prices_csv(t)
+        # auto: if fresh cache exists, use it immediately
+        if source == "auto" and out_cached is not None and fresh:
+            out = out_cached
 
-    # 3) live fetch with fallback to stale cache if providers fail
-    if out is None:
-        try:
-            if freq == "monthly":
-                out = _live_fetch_monthly(t)
-            else:
-                out = _live_fetch_daily(t)
-        except Exception as e:
-            print(f"⚠ {t}: live fetch failed ({freq}): {type(e).__name__}: {e}")
+        # monthly CSV fallback (dev)
+        if out is None and freq == "monthly":
+            out = _load_from_monthly_prices_csv(t)
 
-            # If we have stale cache, use it rather than failing hard
-            if out_cached is not None and not out_cached.empty:
-                out = out_cached
-            else:
-                return None
+        # live fetch order:
+        # - yfinance (live-first): try live first
+        # - auto: try live if no fresh cache returned
+        if out is None:
+            try:
+                if freq == "monthly":
+                    out = _live_fetch_monthly(t)
+                else:
+                    out = _live_fetch_daily(t)
+            except Exception as e:
+                print(f"⚠ {t}: live fetch failed ({freq}): {type(e).__name__}: {e}")
+
+                # fallback to stale cache if we have it
+                if out_cached is not None and not out_cached.empty:
+                    out = out_cached
+                else:
+                    return None
 
     if out is None or out.empty:
         print(f"⚠ {t}: Not enough data (empty)")
