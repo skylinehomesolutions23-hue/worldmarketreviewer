@@ -1,4 +1,3 @@
-// mobile-expo/app/(tabs)/_layout.tsx
 import { Tabs } from "expo-router";
 import React from "react";
 
@@ -24,6 +23,16 @@ export default function TabLayout() {
           title: "Home",
           tabBarIcon: ({ color }) => (
             <IconSymbol size={28} name="house.fill" color={color} />
+          ),
+        }}
+      />
+
+      <Tabs.Screen
+        name="compare"
+        options={{
+          title: "Compare",
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={28} name="arrow.left.arrow.right.circle.fill" color={color} />
           ),
         }}
       />

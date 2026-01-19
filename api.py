@@ -79,16 +79,14 @@ def confidence_score(prob_up: Optional[float]) -> Optional[float]:
 
 def confidence_label(prob_up: Optional[float]) -> str:
     """
-    Based on distance from 0.5:
-      LOW    : 0.50–0.55 (or 0.45–0.50, but we still label)
+    Based on distance from 0.5 (|p-0.5|):
+      LOW    : 0.50–0.55
       MEDIUM : 0.55–0.65
       HIGH   : 0.65+
-    We use |p-0.5|.
     """
     cs = confidence_score(prob_up)
     if cs is None:
         return "UNKNOWN"
-    # cs corresponds: 0.10 -> p=0.55 ; 0.30 -> p=0.65
     if cs >= 0.30:
         return "HIGH"
     if cs >= 0.10:
@@ -116,6 +114,7 @@ def _load_prices(
     try:
         return load_stock_data(t, freq=freq, lookback_days=int(lookback_days), source=source_pref)
     except TypeError:
+        # older load_stock_data signature fallback
         return load_stock_data(t, freq=freq, lookback_days=int(lookback_days))
 
 
@@ -220,10 +219,11 @@ def _run_one_ticker(
     horizon_days: int,
     base_weekly_move: float,
     retrain: bool = True,
+    source_pref: str = "auto",
 ) -> Dict[str, Any]:
     t = ticker.upper().strip()
 
-    df = _load_prices(t, freq="daily", lookback_days=365 * 6, source_pref="auto")
+    df = _load_prices(t, freq="daily", lookback_days=365 * 6, source_pref=source_pref)
     if df is None or len(df) < 30:
         raise ValueError("Not enough data")
 
@@ -258,7 +258,6 @@ def _run_one_ticker(
         "horizon_days": int(horizon_days),
         "as_of_date": as_of_date,
         "as_of_close": json_safe(as_of_close),
-        # confidence fields (computed, not stored)
         "confidence_score": json_safe(confidence_score(prob_up)),
         "confidence": confidence_label(prob_up),
     }
@@ -321,6 +320,7 @@ class PredictRequest(BaseModel):
     base_weekly_move: float = 0.02
     max_parallel: int = 1
     retrain: bool = True
+    source_pref: Optional[str] = "auto"  # NEW
 
 
 class SummaryRequest(BaseModel):
@@ -329,9 +329,9 @@ class SummaryRequest(BaseModel):
     horizon_days: int = 5
     base_weekly_move: float = 0.02
     max_parallel: int = 1
-    # NEW: confidence filtering
     min_confidence: Optional[str] = None  # LOW / MEDIUM / HIGH
     min_prob_up: Optional[float] = None   # optional numeric filter (UP only)
+    source_pref: Optional[str] = "auto"   # NEW
 
 
 # -----------------------------
@@ -347,7 +347,7 @@ def health():
     return {
         "status": "ok",
         "service": "worldmarketreviewer",
-        "version": "0.9.0",
+        "version": "0.9.1",
         "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
 
@@ -359,11 +359,8 @@ def health():
 def data_sources():
     return {
         "default": "auto",
-        "supported_preferences": ["auto", "cache", "yfinance"],
-        "note": (
-            "Some endpoints accept source_pref. If your load_stock_data does not support "
-            "explicit source selection, the server will ignore it and use its normal behavior."
-        ),
+        "supported_preferences": ["auto", "cache", "live"],
+        "note": "Endpoints that accept source_pref will route data loading accordingly.",
     }
 
 
@@ -371,9 +368,9 @@ def data_sources():
 def explain():
     return {
         "what_this_app_does": (
-            "For each ticker, the backend downloads daily prices, builds features, and uses a "
-            "walk-forward RandomForest model to estimate the probability the price will be higher "
-            "after N trading days (horizon_days)."
+            "For each ticker, the backend loads daily prices, builds technical features, "
+            "and uses a walk-forward RandomForest model to estimate the probability the price "
+            "will be higher after N trading days (horizon_days)."
         ),
         "fields": {
             "direction": "UP means prob_up >= 0.50, DOWN means prob_up < 0.50.",
@@ -384,15 +381,11 @@ def explain():
             "horizon_days": "How many trading days ahead the prediction targets (e.g., 5).",
             "as_of_date": "The last price date used when generating that prediction.",
             "scoring": "Later, we check what actually happened after horizon_days and compute accuracy.",
+            "source_pref": "auto/cache/live controls whether to prefer cache or force fresh data.",
         },
         "important": [
             "Markets are uncertain. 100% accuracy is impossible.",
             "The goal is measurable edge + transparency, not certainty.",
-        ],
-        "how_to_use_confidence": [
-            "Start with HIGH confidence only to reduce noise.",
-            "As you learn, expand to MEDIUM.",
-            "LOW is often too close to a coin flip.",
         ],
     }
 
@@ -419,9 +412,9 @@ def summary_head():
 
 
 @app.get("/api/debug_prices")
-def debug_prices(ticker: str = "SPY", freq: str = "daily", lookback_days: int = 365 * 6):
+def debug_prices(ticker: str = "SPY", freq: str = "daily", lookback_days: int = 365 * 6, source_pref: str = "auto"):
     t = (ticker or "").upper().strip()
-    df = _load_prices(t, freq=freq, lookback_days=int(lookback_days), source_pref="auto")
+    df = _load_prices(t, freq=freq, lookback_days=int(lookback_days), source_pref=source_pref)
     if df is None or df.empty:
         return {"ticker": t, "ok": False, "note": "load_stock_data returned None/empty."}
 
@@ -429,6 +422,7 @@ def debug_prices(ticker: str = "SPY", freq: str = "daily", lookback_days: int = 
         "ticker": t,
         "ok": True,
         "freq": freq,
+        "source_pref": source_pref,
         "source": df.attrs.get("source", "unknown"),
         "rows": int(len(df)),
         "start": str(df.index.min()),
@@ -460,6 +454,7 @@ def sparkline(ticker: str = "SPY", n: int = 60, lookback_days: int = 120, source
         "n": n,
         "closes": closes,
         "dates": dates,
+        "source_pref": source_pref,
         "source": payload.get("source", df.attrs.get("source", "unknown")),
         "rows": payload.get("rows", int(len(df))),
         "close_col": payload.get("close_col"),
@@ -507,6 +502,7 @@ def sparklines(
             "n": n,
             "closes": closes,
             "dates": dates,
+            "source_pref": source_pref,
             "source": payload.get("source", df.attrs.get("source", "unknown")),
             "rows": payload.get("rows", int(len(df))),
             "close_col": payload.get("close_col"),
@@ -567,7 +563,7 @@ def verify(
 
     df = _load_prices(t, freq="daily", lookback_days=lookback_days, source_pref=source_pref)
     if df is None or df.empty:
-        return {"ticker": t, "ok": False, "note": "No data returned."}
+        return {"ticker": t, "ok": False, "note": "No data returned.", "source_pref": source_pref}
 
     payload = _sparkline_from_df(df, n=max(n, horizon_days + 2))
     closes = payload.get("closes") or []
@@ -579,6 +575,7 @@ def verify(
             "ok": False,
             "note": "Not enough closes to compute horizon return.",
             "rows": payload.get("rows", int(len(df))),
+            "source_pref": source_pref,
         }
 
     last_close = closes[-1]
@@ -598,6 +595,7 @@ def verify(
         "ticker": t,
         "ok": True,
         "horizon_days": horizon_days,
+        "source_pref": source_pref,
         "source": payload.get("source", df.attrs.get("source", "unknown")),
         "close_col": payload.get("close_col"),
         "last": {"close": last_close, "date": dates[-1] if dates else ""},
@@ -727,7 +725,6 @@ def metrics(ticker: str = "SPY", horizon_days: int = 5, limit: int = 500):
     ret_sum = 0.0
     ret_n = 0
 
-    bucket_edges = [0.00, 0.10, 0.30, 1.01]  # LOW, MEDIUM, HIGH by confidence_score
     buckets = [
         {"label": "LOW", "lo": 0.00, "hi": 0.10, "count": 0, "hit_rate": None},
         {"label": "MEDIUM", "lo": 0.10, "hi": 0.30, "count": 0, "hit_rate": None},
@@ -768,9 +765,6 @@ def metrics(ticker: str = "SPY", horizon_days: int = 5, limit: int = 500):
 
 @app.get("/api/report_card")
 def report_card(ticker: str = "SPY", horizon_days: int = 5, limit: int = 500):
-    """
-    A friendly summary for beginners.
-    """
     t = (ticker or "").upper().strip()
     horizon_days = max(1, min(60, int(horizon_days)))
     limit = max(10, min(5000, int(limit)))
@@ -819,6 +813,7 @@ def run_phase2(req: PredictRequest):
     horizon_days = int(req.horizon_days)
     base_weekly_move = float(req.base_weekly_move)
     retrain = bool(req.retrain)
+    source_pref = (req.source_pref or "auto").lower().strip()
 
     create_run(run_id, total=len(tickers_list))
 
@@ -829,7 +824,7 @@ def run_phase2(req: PredictRequest):
     if max_parallel == 1:
         for t in tickers_list:
             try:
-                results.append(_run_one_ticker(t, horizon_days, base_weekly_move, retrain=retrain))
+                results.append(_run_one_ticker(t, horizon_days, base_weekly_move, retrain=retrain, source_pref=source_pref))
             except Exception as e:
                 errors[t] = str(e)
             completed += 1
@@ -837,7 +832,7 @@ def run_phase2(req: PredictRequest):
     else:
         with ThreadPoolExecutor(max_workers=max_parallel) as ex:
             futs = {
-                ex.submit(_run_one_ticker, t, horizon_days, base_weekly_move, retrain): t
+                ex.submit(_run_one_ticker, t, horizon_days, base_weekly_move, retrain, source_pref): t
                 for t in tickers_list
             }
             for fut in as_completed(futs):
@@ -850,7 +845,6 @@ def run_phase2(req: PredictRequest):
                 update_run_progress(run_id, completed)
 
     if results:
-        # DB insert will ignore extra keys (confidence fields) and store as_of_* via db.py
         insert_predictions(run_id, results)
 
     finish_run(run_id)
@@ -864,6 +858,7 @@ def run_phase2(req: PredictRequest):
         "errors": errors,
         "horizon_days": horizon_days,
         "retrain": retrain,
+        "source_pref": source_pref,
     }
 
 
@@ -909,6 +904,7 @@ def summary_post(req: SummaryRequest):
     horizon_days = int(req.horizon_days)
     base_weekly_move = float(req.base_weekly_move)
     retrain = bool(req.retrain)
+    source_pref = (req.source_pref or "auto").lower().strip()
 
     min_conf = (req.min_confidence or "").upper().strip()
     min_conf_rank = _confidence_rank(min_conf) if min_conf else 0
@@ -922,12 +918,10 @@ def summary_post(req: SummaryRequest):
     errors: Dict[str, str] = {}
 
     def accept(p: Dict[str, Any]) -> bool:
-        # confidence filter (applies to both UP and DOWN; based on distance from 0.5)
         if min_conf_rank > 0:
             lab = (p.get("confidence") or "").upper().strip()
             if _confidence_rank(lab) < min_conf_rank:
                 return False
-        # min_prob_up filter (UP-only filter; helps “show strong UP calls only”)
         if min_prob_up is not None:
             pu = clamp01(p.get("prob_up"))
             if pu is None or pu < min_prob_up:
@@ -937,7 +931,7 @@ def summary_post(req: SummaryRequest):
     if max_parallel == 1:
         for t in tickers_list:
             try:
-                p = _run_one_ticker(t, horizon_days, base_weekly_move, retrain=retrain)
+                p = _run_one_ticker(t, horizon_days, base_weekly_move, retrain=retrain, source_pref=source_pref)
                 if accept(p):
                     results.append(p)
             except Exception as e:
@@ -945,7 +939,7 @@ def summary_post(req: SummaryRequest):
     else:
         with ThreadPoolExecutor(max_workers=max_parallel) as ex:
             futs = {
-                ex.submit(_run_one_ticker, t, horizon_days, base_weekly_move, retrain): t
+                ex.submit(_run_one_ticker, t, horizon_days, base_weekly_move, retrain, source_pref): t
                 for t in tickers_list
             }
             for fut in as_completed(futs):
@@ -963,6 +957,7 @@ def summary_post(req: SummaryRequest):
         "tickers": tickers_list,
         "horizon_days": horizon_days,
         "retrain": retrain,
+        "source_pref": source_pref,
         "count": len(results),
         "min_confidence": min_conf or None,
         "min_prob_up": min_prob_up,
@@ -981,7 +976,6 @@ def summary(limit: int = 50, run_id: Optional[str] = None):
 
     preds = get_predictions_for_run(run_id, limit=max(1, int(limit)))
 
-    # add confidence computed from stored prob_up for display
     out = []
     for p in preds:
         pu = clamp01(p.get("prob_up"))
