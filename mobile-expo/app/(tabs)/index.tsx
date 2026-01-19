@@ -26,29 +26,17 @@ const STORAGE_KEYS = {
   showDebug: "wmr:showDebug:v3",
   highOnly: "wmr:highOnly:v1",
   lastSourcePref: "wmr:lastSourcePref:v1",
+  showLearn: "wmr:showLearn:v1",
 };
 
 const DEFAULT_TICKERS = [
-  "AMZN",
-  "META",
-  "TSLA",
-  "NVDA",
-  "NFLX",
-  "AMD",
-  "INTC",
-  "JPM",
-  "BAC",
-  "GS",
-  "MS",
-  "XOM",
-  "CVX",
-  "SPY",
-  "QQQ",
+  "AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","JPM","BAC","GS",
+  "MS","XOM","CVX","SPY","QQQ"
 ];
 
 type DirectionFilter = "ALL" | "UP" | "DOWN";
 type SortMode = "PROB_DESC" | "EXP_DESC" | "TICKER_ASC";
-type SourcePref = "auto" | "cache" | "yfinance";
+type SourcePref = "auto" | "cache" | "live";
 
 type PredRow = {
   id?: number;
@@ -139,9 +127,9 @@ function confRank(label: any): number {
 function confLabelFromProb(probUp: number | null): "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN" {
   if (probUp === null) return "UNKNOWN";
   const p = Math.abs(probUp - 0.5);
-  if (p >= 0.2) return "HIGH";
-  if (p >= 0.1) return "MEDIUM";
-  if (p >= 0.0) return "LOW";
+  if (p >= 0.20) return "HIGH";
+  if (p >= 0.10) return "MEDIUM";
+  if (p >= 0.00) return "LOW";
   return "UNKNOWN";
 }
 
@@ -153,6 +141,22 @@ async function openUrl(url: string) {
   } catch {
     Alert.alert("Cannot open link", url);
   }
+}
+
+function cycleSourcePref(cur: SourcePref): SourcePref {
+  return cur === "auto" ? "cache" : cur === "cache" ? "live" : "auto";
+}
+
+function sourcePrefLabel(sp: SourcePref): string {
+  if (sp === "auto") return "AUTO";
+  if (sp === "cache") return "CACHE";
+  return "LIVE";
+}
+
+function sourcePrefHelp(sp: SourcePref): string {
+  if (sp === "auto") return "Auto chooses the best option (usually cache first, then live if needed).";
+  if (sp === "cache") return "Cache prefers saved CSVs (faster, avoids rate limits).";
+  return "Live forces a fresh fetch (slower, can rate-limit).";
 }
 
 export default function HomeScreen() {
@@ -167,8 +171,11 @@ export default function HomeScreen() {
   const [showDebug, setShowDebug] = useState<boolean>(false);
   const [highOnly, setHighOnly] = useState<boolean>(false);
 
-  // ✅ NEW (B): source selector
+  // NEW: source preference for backend data loading
   const [sourcePref, setSourcePref] = useState<SourcePref>("auto");
+
+  // NEW: beginner help panel toggle
+  const [showLearn, setShowLearn] = useState<boolean>(true);
 
   const [loading, setLoading] = useState<boolean>(false);
   const [resp, setResp] = useState<SummaryResponse | null>(null);
@@ -190,6 +197,7 @@ export default function HomeScreen() {
           lastShowDebug,
           lastHighOnly,
           lastSourcePref,
+          lastShowLearn,
         ] = await Promise.all([
           AsyncStorage.getItem(STORAGE_KEYS.savedTickers),
           AsyncStorage.getItem(STORAGE_KEYS.recentRuns),
@@ -201,6 +209,7 @@ export default function HomeScreen() {
           AsyncStorage.getItem(STORAGE_KEYS.showDebug),
           AsyncStorage.getItem(STORAGE_KEYS.highOnly),
           AsyncStorage.getItem(STORAGE_KEYS.lastSourcePref),
+          AsyncStorage.getItem(STORAGE_KEYS.showLearn),
         ]);
 
         if (saved) {
@@ -234,9 +243,14 @@ export default function HomeScreen() {
           setHighOnly(lastHighOnly === "1");
         }
 
-        // ✅ load source pref
-        if (lastSourcePref && ["auto", "cache", "yfinance"].includes(lastSourcePref)) {
+        // NEW: restore source preference
+        if (lastSourcePref && ["auto", "cache", "live"].includes(lastSourcePref)) {
           setSourcePref(lastSourcePref as SourcePref);
+        }
+
+        // NEW: restore learn toggle
+        if (lastShowLearn && (lastShowLearn === "1" || lastShowLearn === "0")) {
+          setShowLearn(lastShowLearn === "1");
         }
       } catch (e: any) {
         setDebugLine(`Init storage error: ${String(e?.message || e)}`);
@@ -256,17 +270,16 @@ export default function HomeScreen() {
     await persist(STORAGE_KEYS.lastTickersInput, val);
   }
 
-  async function persistPrefs(
-    next?: Partial<{
-      horizonDays: number;
-      filter: DirectionFilter;
-      sortMode: SortMode;
-      retrainEveryRun: boolean;
-      showDebug: boolean;
-      highOnly: boolean;
-      sourcePref: SourcePref;
-    }>
-  ) {
+  async function persistPrefs(next?: Partial<{
+    horizonDays: number;
+    filter: DirectionFilter;
+    sortMode: SortMode;
+    retrainEveryRun: boolean;
+    showDebug: boolean;
+    highOnly: boolean;
+    sourcePref: SourcePref;
+    showLearn: boolean;
+  }>) {
     const h = next?.horizonDays ?? horizonDays;
     const f = next?.filter ?? filter;
     const s = next?.sortMode ?? sortMode;
@@ -274,6 +287,7 @@ export default function HomeScreen() {
     const d = next?.showDebug ?? showDebug;
     const ho = next?.highOnly ?? highOnly;
     const sp = next?.sourcePref ?? sourcePref;
+    const sl = next?.showLearn ?? showLearn;
 
     await Promise.all([
       persist(STORAGE_KEYS.lastHorizon, String(h)),
@@ -283,11 +297,12 @@ export default function HomeScreen() {
       persist(STORAGE_KEYS.showDebug, d ? "1" : "0"),
       persist(STORAGE_KEYS.highOnly, ho ? "1" : "0"),
       persist(STORAGE_KEYS.lastSourcePref, sp),
+      persist(STORAGE_KEYS.showLearn, sl ? "1" : "0"),
     ]);
   }
 
-  async function addToRecentRun(list: string[], h: number, retrain: boolean) {
-    const key = `${list.join(",")}|h=${h}|r=${retrain ? 1 : 0}`;
+  async function addToRecentRun(list: string[], h: number, retrain: boolean, sp: SourcePref) {
+    const key = `${list.join(",")}|h=${h}|r=${retrain ? 1 : 0}|src=${sp}`;
     const next = [key, ...recentRuns.filter((x) => x !== key)].slice(0, 10);
     setRecentRuns(next);
     try {
@@ -328,8 +343,7 @@ export default function HomeScreen() {
           horizon_days: horizonDays,
           max_parallel: 1,
           min_confidence,
-          // ✅ NEW (B)
-          source_pref: sourcePref,
+          source_pref: sourcePref, // NEW
         }),
       });
       if (res.ok) return (await safeJson(res)) as SummaryResponse;
@@ -337,19 +351,16 @@ export default function HomeScreen() {
       // ignore
     }
 
-    // GET fallback (stored predictions)
+    // GET fallback (stored predictions) — note: GET does NOT support source_pref (it’s stored data)
     const retrain = retrainEveryRun ? 1 : 0;
-    const qs =
-      `tickers=${encodeURIComponent(list.join(","))}` +
-      `&retrain=${retrain}` +
-      `&horizon_days=${encodeURIComponent(String(horizonDays))}` +
-      `&source_pref=${encodeURIComponent(sourcePref)}`;
-
+    const qs = `tickers=${encodeURIComponent(list.join(","))}&retrain=${retrain}&horizon_days=${encodeURIComponent(
+      String(horizonDays)
+    )}`;
     const res = await fetch(`${API_BASE}/api/summary?${qs}`);
     return (await safeJson(res)) as SummaryResponse;
   }
 
-    async function runPrediction() {
+  async function runPrediction() {
     const list = tickers.length ? tickers : DEFAULT_TICKERS;
     setLoading(true);
     setResp(null);
@@ -358,15 +369,13 @@ export default function HomeScreen() {
     const localGeneratedAt = nowISO();
 
     setDebugLine(
-      `Debug: tickers=${list.join(",")} horizon=${horizonDays} retrain=${retrainEveryRun ? "1" : "0"} highOnly=${
-        highOnly ? "1" : "0"
-      } source_pref=${sourcePref} local_run_id=${localRunId}`
+      `Debug: tickers=${list.join(",")} horizon=${horizonDays} retrain=${retrainEveryRun ? "1" : "0"} highOnly=${highOnly ? "1" : "0"} source_pref=${sourcePref} local_run_id=${localRunId}`
     );
 
     try {
       await persistLastInput(tickersInput);
       await persistPrefs();
-      await addToRecentRun(list, horizonDays, retrainEveryRun);
+      await addToRecentRun(list, horizonDays, retrainEveryRun, sourcePref);
 
       const data: SummaryResponse = await callSummaryAPI(list);
 
@@ -393,16 +402,26 @@ export default function HomeScreen() {
   }
 
   function applyRecentKey(key: string) {
-    // format: CSV|h=5|r=1
-    const [csv, hPart, rPart] = key.split("|");
-    const h = Number((hPart || "").replace("h=", ""));
-    const r = (rPart || "").replace("r=", "") === "1";
+    const parts = key.split("|");
+    const csv = parts[0] || "";
+    const hPart = parts.find((p) => p.startsWith("h=")) || "";
+    const rPart = parts.find((p) => p.startsWith("r=")) || "";
+    const sPart = parts.find((p) => p.startsWith("src=")) || "";
+
+    const h = Number(hPart.replace("h=", ""));
+    const r = rPart.replace("r=", "") === "1";
+    const sp = (sPart.replace("src=", "") as SourcePref) || "auto";
+
     if (csv) applyTickerCSV(csv);
     if (Number.isFinite(h) && h > 0) setHorizonDays(h);
     setRetrainEveryRun(r);
+
+    if (["auto", "cache", "live"].includes(sp)) setSourcePref(sp);
+
     persistPrefs({
       horizonDays: Number.isFinite(h) && h > 0 ? h : horizonDays,
       retrainEveryRun: r,
+      sourcePref: ["auto", "cache", "live"].includes(sp) ? sp : sourcePref,
     });
   }
 
@@ -419,7 +438,6 @@ export default function HomeScreen() {
           prob_up: prob,
           exp_return: typeof p.exp_return === "number" ? p.exp_return : Number(p.exp_return),
           confidence: (p.confidence ? String(p.confidence).toUpperCase() : computedLabel) as any,
-          // ✅ keep confidence_score aligned with backend (0..1)
           confidence_score: p.confidence_score ?? (prob === null ? null : Math.abs(prob - 0.5) * 2),
         };
       })
@@ -442,7 +460,6 @@ export default function HomeScreen() {
     } else if (sortMode === "EXP_DESC") {
       arr.sort((a, b) => (Number(b.exp_return) || -999) - (Number(a.exp_return) || -999));
     } else {
-      // PROB_DESC: tie-breaker by confidence label
       arr.sort((a, b) => {
         const pb = Number(b.prob_up);
         const pa = Number(a.prob_up);
@@ -474,19 +491,13 @@ export default function HomeScreen() {
     return Object.keys(e).sort();
   }, [resp]);
 
-  function cycleSourcePref(cur: SourcePref): SourcePref {
-    // auto -> cache -> yfinance -> auto
-    if (cur === "auto") return "cache";
-    if (cur === "cache") return "yfinance";
-    return "auto";
-  }
-
   return (
     <View style={styles.screen}>
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>WorldMarketReviewer</Text>
         <Text style={styles.subtitle}>Mobile Predictions (Render backend)</Text>
 
+        {/* Controls */}
         <View style={styles.card}>
           <Text style={styles.label}>Tickers (comma or space separated)</Text>
           <TextInput
@@ -540,7 +551,7 @@ export default function HomeScreen() {
               <Text style={styles.smallButtonText}>High only: {highOnly ? "ON" : "OFF"}</Text>
             </Pressable>
 
-            {/* ✅ NEW (B): Source selector */}
+            {/* NEW: Data Source */}
             <Pressable
               onPress={() => {
                 setSourcePref((v) => {
@@ -551,15 +562,15 @@ export default function HomeScreen() {
               }}
               style={styles.smallButton}
             >
-              <Text style={styles.smallButtonText}>
-                Source: {sourcePref === "auto" ? "Auto" : sourcePref === "cache" ? "Cache" : "Live"}
-              </Text>
+              <Text style={styles.smallButtonText}>Source: {sourcePrefLabel(sourcePref)}</Text>
             </Pressable>
 
             <Pressable onPress={runPrediction} style={styles.button}>
               <Text style={styles.buttonText}>{loading ? "Running..." : "Run"}</Text>
             </Pressable>
           </View>
+
+          <Text style={styles.mutedSmall}>{sourcePrefHelp(sourcePref)}</Text>
 
           {loading && (
             <View style={styles.loadingRow}>
@@ -569,12 +580,47 @@ export default function HomeScreen() {
           )}
 
           <View style={styles.row}>
+            <Pressable
+              onPress={() => {
+                setShowLearn((v) => {
+                  const nv = !v;
+                  persist(STORAGE_KEYS.showLearn, nv ? "1" : "0");
+                  return nv;
+                });
+              }}
+              style={styles.linkButton}
+            >
+              <Text style={styles.linkButtonText}>{showLearn ? "Hide beginner help" : "Show beginner help"}</Text>
+            </Pressable>
+
             <Pressable onPress={() => openUrl(`${API_BASE}/api/explain`)} style={styles.linkButton}>
-              <Text style={styles.linkButtonText}>What am I looking at?</Text>
+              <Text style={styles.linkButtonText}>Open full explain (JSON)</Text>
             </Pressable>
           </View>
+
+          {/* NEW: beginner help panel */}
+          {showLearn ? (
+            <View style={styles.learnBox}>
+              <Text style={styles.learnTitle}>Beginner quick guide</Text>
+              <Text style={styles.learnText}>
+                • <Text style={styles.learnBold}>prob_up</Text> is the model’s estimated chance the price will be higher
+                after the selected horizon (ex: 5 trading days).
+              </Text>
+              <Text style={styles.learnText}>
+                • <Text style={styles.learnBold}>UP/DOWN</Text> is just whether prob_up is above or below 50%.
+              </Text>
+              <Text style={styles.learnText}>
+                • <Text style={styles.learnBold}>Confidence</Text> is how far prob_up is from 50/50 (not a guarantee).
+              </Text>
+              <Text style={styles.learnText}>
+                • Use <Text style={styles.learnBold}>Verify</Text> to compare recent price movement, and{" "}
+                <Text style={styles.learnBold}>Report card</Text> to see scored accuracy over time.
+              </Text>
+            </View>
+          ) : null}
         </View>
 
+        {/* Saved tickers */}
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Saved tickers</Text>
           <Text style={styles.hint}>Tap to replace input. Long-press removes.</Text>
@@ -610,6 +656,7 @@ export default function HomeScreen() {
           </View>
         </View>
 
+        {/* Recent runs */}
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Recent runs</Text>
           <Text style={styles.hint}>Tap to reuse the exact same set (repeatability).</Text>
@@ -620,13 +667,14 @@ export default function HomeScreen() {
             <View style={styles.recentList}>
               {recentRuns.map((key) => (
                 <Pressable key={key} onPress={() => applyRecentKey(key)} style={styles.recentItem}>
-                  <Text style={styles.recentText}>{key.replace("|", "  ")}</Text>
+                  <Text style={styles.recentText}>{key.replace(/\|/g, "  ")}</Text>
                 </Pressable>
               ))}
             </View>
           )}
         </View>
 
+        {/* Results */}
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Results</Text>
 
@@ -684,7 +732,8 @@ export default function HomeScreen() {
                       style={styles.smallButton}
                     >
                       <Text style={styles.smallButtonText}>
-                        Sort: {sortMode === "PROB_DESC" ? "Prob ↓" : sortMode === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}
+                        Sort:{" "}
+                        {sortMode === "PROB_DESC" ? "Prob ↓" : sortMode === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}
                       </Text>
                     </Pressable>
 
@@ -708,9 +757,7 @@ export default function HomeScreen() {
                       {topUp.length === 0 ? (
                         <Text style={styles.muted}>None.</Text>
                       ) : (
-                        topUp.map((p) => (
-                          <ResultCard key={`up-${p.ticker}`} p={p} sourcePref={sourcePref} />
-                        ))
+                        topUp.map((p) => <ResultCard key={`up-${p.ticker}`} p={p} sourcePref={sourcePref} />)
                       )}
                     </View>
 
@@ -719,9 +766,7 @@ export default function HomeScreen() {
                       {topDown.length === 0 ? (
                         <Text style={styles.muted}>None.</Text>
                       ) : (
-                        topDown.map((p) => (
-                          <ResultCard key={`down-${p.ticker}`} p={p} sourcePref={sourcePref} />
-                        ))
+                        topDown.map((p) => <ResultCard key={`down-${p.ticker}`} p={p} sourcePref={sourcePref} />)
                       )}
                     </View>
                   </View>
@@ -758,7 +803,7 @@ function ResultCard({ p, sourcePref }: { p: PredRow; sourcePref: SourcePref }) {
   const confStyle =
     conf === "HIGH" ? styles.badgeConfHigh : conf === "MEDIUM" ? styles.badgeConfMed : styles.badgeConfLow;
 
-  const horizon = String(p.horizon_days ?? 5);
+  const hz = p.horizon_days ?? 5;
 
   return (
     <View style={styles.resultCard}>
@@ -777,8 +822,8 @@ function ResultCard({ p, sourcePref }: { p: PredRow; sourcePref: SourcePref }) {
       </View>
 
       <Text style={styles.resultMeta}>
-        exp: {fmtNum(exp, 4)} • horizon: {horizon}d
-        {p.source ? ` • src: ${p.source}` : ""}
+        exp: {fmtNum(exp, 4)}  •  horizon: {hz}d
+        {p.source ? `  •  src: ${p.source}` : ""}
       </Text>
 
       <View style={styles.row}>
@@ -786,7 +831,7 @@ function ResultCard({ p, sourcePref }: { p: PredRow; sourcePref: SourcePref }) {
           onPress={() =>
             openUrl(
               `${API_BASE}/api/verify?ticker=${encodeURIComponent(ticker)}&horizon_days=${encodeURIComponent(
-                horizon
+                String(hz)
               )}&source_pref=${encodeURIComponent(sourcePref)}`
             )
           }
@@ -799,7 +844,7 @@ function ResultCard({ p, sourcePref }: { p: PredRow; sourcePref: SourcePref }) {
           onPress={() =>
             openUrl(
               `${API_BASE}/api/report_card?ticker=${encodeURIComponent(ticker)}&horizon_days=${encodeURIComponent(
-                horizon
+                String(hz)
               )}&source_pref=${encodeURIComponent(sourcePref)}`
             )
           }
@@ -963,6 +1008,18 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 12,
   },
+
+  learnBox: {
+    marginTop: 12,
+    backgroundColor: "#0B1220",
+    borderColor: "#223256",
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+  },
+  learnTitle: { color: "#FFFFFF", fontWeight: "900", marginBottom: 8 },
+  learnText: { color: "#A7B0C0", lineHeight: 18, marginTop: 4 },
+  learnBold: { color: "#E5E7EB", fontWeight: "900" },
 
   debug: { marginTop: 14, color: "#93A4C7", fontSize: 12 },
 });

@@ -32,7 +32,7 @@ export default function TabLayout() {
         options={{
           title: "Compare",
           tabBarIcon: ({ color }) => (
-            <IconSymbol size={28} name="arrow.left.arrow.right.circle.fill" color={color} />
+            <IconSymbol size={28} name="chart.line.uptrend.xyaxis" color={color} />
           ),
         }}
       />
