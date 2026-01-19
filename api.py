@@ -364,6 +364,31 @@ def data_sources():
     }
 
 
+@app.get("/api/news")
+def news(
+    ticker: str = "SPY",
+    limit: int = 20,
+    hours_back: int = 72,
+    provider: str = "gdelt",
+):
+    t = (ticker or "").upper().strip()
+    limit = max(1, min(50, int(limit)))
+    hours_back = max(6, min(24 * 30, int(hours_back)))
+    provider = (provider or "gdelt").lower().strip()
+
+    try:
+        return fetch_news(ticker=t, limit=limit, hours_back=hours_back, provider=provider)
+    except Exception as e:
+        return {
+            "ok": False,
+            "provider": provider,
+            "ticker": t,
+            "error": str(e),
+            "note": "News provider error.",
+            "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+
+
 @app.get("/api/explain")
 def explain():
     return {
