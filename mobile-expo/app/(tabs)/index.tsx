@@ -13,6 +13,10 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+// If "@/..." alias doesn't work in your project, change this line to:
+// import BeginnerHelp from "../../components/BeginnerHelp";
+import BeginnerHelp from "@/components/BeginnerHelp";
+
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
 const STORAGE_KEYS = {
@@ -30,8 +34,8 @@ const STORAGE_KEYS = {
 };
 
 const DEFAULT_TICKERS = [
-  "AMZN","META","TSLA","NVDA","NFLX","AMD","INTC","JPM","BAC","GS",
-  "MS","XOM","CVX","SPY","QQQ"
+  "AMZN", "META", "TSLA", "NVDA", "NFLX", "AMD", "INTC", "JPM", "BAC", "GS",
+  "MS", "XOM", "CVX", "SPY", "QQQ",
 ];
 
 type DirectionFilter = "ALL" | "UP" | "DOWN";
@@ -127,9 +131,9 @@ function confRank(label: any): number {
 function confLabelFromProb(probUp: number | null): "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN" {
   if (probUp === null) return "UNKNOWN";
   const p = Math.abs(probUp - 0.5);
-  if (p >= 0.20) return "HIGH";
-  if (p >= 0.10) return "MEDIUM";
-  if (p >= 0.00) return "LOW";
+  if (p >= 0.2) return "HIGH";
+  if (p >= 0.1) return "MEDIUM";
+  if (p >= 0.0) return "LOW";
   return "UNKNOWN";
 }
 
@@ -171,10 +175,7 @@ export default function HomeScreen() {
   const [showDebug, setShowDebug] = useState<boolean>(false);
   const [highOnly, setHighOnly] = useState<boolean>(false);
 
-  // NEW: source preference for backend data loading
   const [sourcePref, setSourcePref] = useState<SourcePref>("auto");
-
-  // NEW: beginner help panel toggle
   const [showLearn, setShowLearn] = useState<boolean>(true);
 
   const [loading, setLoading] = useState<boolean>(false);
@@ -242,13 +243,9 @@ export default function HomeScreen() {
         if (lastHighOnly && (lastHighOnly === "1" || lastHighOnly === "0")) {
           setHighOnly(lastHighOnly === "1");
         }
-
-        // NEW: restore source preference
         if (lastSourcePref && ["auto", "cache", "live"].includes(lastSourcePref)) {
           setSourcePref(lastSourcePref as SourcePref);
         }
-
-        // NEW: restore learn toggle
         if (lastShowLearn && (lastShowLearn === "1" || lastShowLearn === "0")) {
           setShowLearn(lastShowLearn === "1");
         }
@@ -261,9 +258,7 @@ export default function HomeScreen() {
   async function persist(key: string, val: string) {
     try {
       await AsyncStorage.setItem(key, val);
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   async function persistLastInput(val: string) {
@@ -343,15 +338,13 @@ export default function HomeScreen() {
           horizon_days: horizonDays,
           max_parallel: 1,
           min_confidence,
-          source_pref: sourcePref, // NEW
+          source_pref: sourcePref,
         }),
       });
       if (res.ok) return (await safeJson(res)) as SummaryResponse;
-    } catch {
-      // ignore
-    }
+    } catch {}
 
-    // GET fallback (stored predictions) — note: GET does NOT support source_pref (it’s stored data)
+    // GET fallback (stored predictions)
     const retrain = retrainEveryRun ? 1 : 0;
     const qs = `tickers=${encodeURIComponent(list.join(","))}&retrain=${retrain}&horizon_days=${encodeURIComponent(
       String(horizonDays)
@@ -551,7 +544,7 @@ export default function HomeScreen() {
               <Text style={styles.smallButtonText}>High only: {highOnly ? "ON" : "OFF"}</Text>
             </Pressable>
 
-            {/* NEW: Data Source */}
+            {/* Data Source */}
             <Pressable
               onPress={() => {
                 setSourcePref((v) => {
@@ -598,26 +591,8 @@ export default function HomeScreen() {
             </Pressable>
           </View>
 
-          {/* NEW: beginner help panel */}
-          {showLearn ? (
-            <View style={styles.learnBox}>
-              <Text style={styles.learnTitle}>Beginner quick guide</Text>
-              <Text style={styles.learnText}>
-                • <Text style={styles.learnBold}>prob_up</Text> is the model’s estimated chance the price will be higher
-                after the selected horizon (ex: 5 trading days).
-              </Text>
-              <Text style={styles.learnText}>
-                • <Text style={styles.learnBold}>UP/DOWN</Text> is just whether prob_up is above or below 50%.
-              </Text>
-              <Text style={styles.learnText}>
-                • <Text style={styles.learnBold}>Confidence</Text> is how far prob_up is from 50/50 (not a guarantee).
-              </Text>
-              <Text style={styles.learnText}>
-                • Use <Text style={styles.learnBold}>Verify</Text> to compare recent price movement, and{" "}
-                <Text style={styles.learnBold}>Report card</Text> to see scored accuracy over time.
-              </Text>
-            </View>
-          ) : null}
+          {/* Beginner help (component) */}
+          {showLearn ? <BeginnerHelp horizonDays={horizonDays} /> : null}
         </View>
 
         {/* Saved tickers */}
@@ -732,8 +707,7 @@ export default function HomeScreen() {
                       style={styles.smallButton}
                     >
                       <Text style={styles.smallButtonText}>
-                        Sort:{" "}
-                        {sortMode === "PROB_DESC" ? "Prob ↓" : sortMode === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}
+                        Sort: {sortMode === "PROB_DESC" ? "Prob ↓" : sortMode === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}
                       </Text>
                     </Pressable>
 
@@ -840,12 +814,13 @@ function ResultCard({ p, sourcePref }: { p: PredRow; sourcePref: SourcePref }) {
           <Text style={styles.linkPillText}>Verify</Text>
         </Pressable>
 
+        {/* IMPORTANT: report_card does NOT take source_pref */}
         <Pressable
           onPress={() =>
             openUrl(
               `${API_BASE}/api/report_card?ticker=${encodeURIComponent(ticker)}&horizon_days=${encodeURIComponent(
                 String(hz)
-              )}&source_pref=${encodeURIComponent(sourcePref)}`
+              )}`
             )
           }
           style={styles.linkPill}
@@ -1008,18 +983,6 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 12,
   },
-
-  learnBox: {
-    marginTop: 12,
-    backgroundColor: "#0B1220",
-    borderColor: "#223256",
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-  },
-  learnTitle: { color: "#FFFFFF", fontWeight: "900", marginBottom: 8 },
-  learnText: { color: "#A7B0C0", lineHeight: 18, marginTop: 4 },
-  learnBold: { color: "#E5E7EB", fontWeight: "900" },
 
   debug: { marginTop: 14, color: "#93A4C7", fontSize: 12 },
 });
