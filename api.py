@@ -3,7 +3,9 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from urllib.parse import quote_plus
 
+import httpx
 from fastapi import FastAPI
 from fastapi.responses import Response, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -212,6 +214,202 @@ def _extract_as_of(df) -> Tuple[Optional[str], Optional[float], Optional[str]]:
 
 
 # -----------------------------
+# news (GDELT)
+# -----------------------------
+def _hours_to_timespan(hours_back: int) -> str:
+    """
+    GDELT timespan supports minutes/hours/days/weeks/months like:
+      72h, 7d, 1w, 1m, etc. :contentReference[oaicite:1]{index=1}
+    """
+    hb = max(1, int(hours_back))
+    # Prefer days if it divides cleanly and is >= 24h
+    if hb >= 24 and hb % 24 == 0:
+        d = hb // 24
+        return f"{d}d"
+    return f"{hb}h"
+
+def _news_query_for_ticker(t: str) -> str:
+    """
+    GDELT rejects very short phrases like 'TSLA'.
+    Use a slightly longer, human-readable query.
+    """
+    t = (t or "").upper().strip()
+
+    # Add mappings as you expand your ticker list
+    alias = {
+        "TSLA": '"Tesla"',
+        "META": '"Meta" OR "Facebook"',
+        "GOOGL": '"Google" OR "Alphabet"',
+        "GOOG": '"Google" OR "Alphabet"',
+        "AAPL": '"Apple"',
+        "AMZN": '"Amazon"',
+        "MSFT": '"Microsoft"',
+        "NVDA": '"Nvidia"',
+        "NFLX": '"Netflix"',
+        "AMD": '"AMD" OR "Advanced Micro Devices"',
+        "INTC": '"Intel"',
+        "JPM": '"JPMorgan" OR "JP Morgan"',
+        "BAC": '"Bank of America"',
+        "GS": '"Goldman Sachs"',
+        "MS": '"Morgan Stanley"',
+        "XOM": '"Exxon" OR "ExxonMobil"',
+        "CVX": '"Chevron"',
+        "SPY": '"S&P 500" OR SPY',
+        "QQQ": '"Nasdaq 100" OR QQQ',
+        "IWM": '"Russell 2000" OR IWM',
+    }
+
+    if t in alias:
+        return alias[t]
+
+    # Fallback: quote the ticker + add "stock" to make phrase longer
+    # Example: "TSLA stock" / "SPY stock"
+    return f'"{t} stock"'
+
+
+def fetch_news(
+    ticker: str,
+    limit: int = 20,
+    hours_back: int = 72,
+    provider: str = "gdelt",
+) -> Dict[str, Any]:
+    provider = (provider or "gdelt").lower().strip()
+    t = (ticker or "").upper().strip()
+    limit = max(1, min(50, int(limit)))
+    hours_back = max(6, min(24 * 30, int(hours_back)))
+
+    if provider != "gdelt":
+        return {"ok": False, "provider": provider, "ticker": t, "error": "Only provider=gdelt is supported right now."}
+
+    if not t:
+        return {"ok": False, "provider": provider, "ticker": t, "error": "Missing ticker."}
+
+    query = _news_query_for_ticker(t)
+    timespan = _hours_to_timespan(hours_back)
+
+    base = "https://api.gdeltproject.org/api/v2/doc/doc"
+    url = (
+        f"{base}"
+        f"?query={quote_plus(query)}"
+        f"&mode=artlist"
+        f"&format=json"
+        f"&sort=datedesc"
+        f"&maxrecords={limit}"
+        f"&timespan={quote_plus(timespan)}"
+    )
+
+    headers = {
+        # Some public endpoints behave better with an explicit UA.
+        "User-Agent": "WorldMarketReviewer/0.9 (+https://example.invalid)",
+        "Accept": "application/json,text/plain,*/*",
+    }
+
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True, headers=headers) as client:
+            r = client.get(url)
+            status = r.status_code
+            ctype = (r.headers.get("content-type") or "").lower()
+            text = (r.text or "").strip()
+
+            # Helpful debug info when it fails
+            if status != 200:
+                return {
+                    "ok": False,
+                    "provider": provider,
+                    "ticker": t,
+                    "error": f"HTTP {status}",
+                    "content_type": ctype,
+                    "url": url,
+                    "body_preview": text[:300],
+                    "note": "News provider returned non-200.",
+                    "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                }
+
+            if not text:
+                return {
+                    "ok": False,
+                    "provider": provider,
+                    "ticker": t,
+                    "error": "Empty response body from provider",
+                    "content_type": ctype,
+                    "url": url,
+                    "note": "News provider returned empty body.",
+                    "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                }
+
+            # If we got HTML, we know it's not JSON.
+            if "text/html" in ctype or text.startswith("<!doctype") or text.startswith("<html"):
+                return {
+                    "ok": False,
+                    "provider": provider,
+                    "ticker": t,
+                    "error": "Provider returned HTML instead of JSON",
+                    "content_type": ctype,
+                    "url": url,
+                    "body_preview": text[:300],
+                    "note": "Likely an upstream error page / block / redirect.",
+                    "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                }
+
+            # Parse JSON safely
+            try:
+                data = r.json()
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "provider": provider,
+                    "ticker": t,
+                    "error": f"JSON parse failed: {e}",
+                    "content_type": ctype,
+                    "url": url,
+                    "body_preview": text[:300],
+                    "note": "Provider returned non-JSON or malformed JSON.",
+                    "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "provider": provider,
+            "ticker": t,
+            "error": str(e),
+            "url": url,
+            "note": "Request failed (timeout/network).",
+            "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+
+    articles = data.get("articles", []) or []
+    items: List[Dict[str, Any]] = []
+    for a in articles:
+        url_a = a.get("url")
+        if not url_a:
+            continue
+        items.append(
+            {
+                "title": a.get("title") or "(untitled)",
+                "url": url_a,
+                "domain": a.get("domain"),
+                "seendate": a.get("seendate"),
+                "socialimage": a.get("socialimage"),
+                "sourcecountry": a.get("sourcecountry"),
+                "language": a.get("language"),
+            }
+        )
+
+    return {
+        "ok": True,
+        "provider": provider,
+        "ticker": t,
+        "limit": limit,
+        "hours_back": hours_back,
+        "timespan": timespan,
+        "items": items,
+        "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+
+
+
+# -----------------------------
 # core prediction
 # -----------------------------
 def _run_one_ticker(
@@ -337,9 +535,17 @@ class SummaryRequest(BaseModel):
 # -----------------------------
 # startup
 # -----------------------------
+import os  # add this at the top of api.py if not already there
+
 @app.on_event("startup")
 def _startup():
+    # Local dev: if DATABASE_URL isn't set, skip DB init.
+    # Render: DATABASE_URL is set, so init_db runs normally.
+    if not os.getenv("DATABASE_URL"):
+        print("[startup] DATABASE_URL not set; skipping init_db (local dev mode).")
+        return
     init_db()
+
 
 
 @app.get("/health")
@@ -376,17 +582,7 @@ def news(
     hours_back = max(6, min(24 * 30, int(hours_back)))
     provider = (provider or "gdelt").lower().strip()
 
-    try:
-        return fetch_news(ticker=t, limit=limit, hours_back=hours_back, provider=provider)
-    except Exception as e:
-        return {
-            "ok": False,
-            "provider": provider,
-            "ticker": t,
-            "error": str(e),
-            "note": "News provider error.",
-            "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        }
+    return fetch_news(ticker=t, limit=limit, hours_back=hours_back, provider=provider)
 
 
 @app.get("/api/explain")
