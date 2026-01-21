@@ -15,10 +15,17 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
 const STORAGE_KEYS = {
-  lastNewsTicker: "wmr:lastNewsTicker:v2",
-  lastNewsLimit: "wmr:lastNewsLimit:v2",
-  lastNewsHoursBack: "wmr:lastNewsHoursBack:v2",
-  newsLanguage: "wmr:newsLanguage:v2", // "ALL" or "English" etc
+  // Try multiple keys because your project evolved over time
+  savedTickersCandidates: [
+    "wmr:savedTickers:v3",
+    "wmr:savedTickers:v2",
+    "wmr:savedTickers:v1",
+    "savedTickers",
+  ],
+  lastNewsTicker: "wmr:lastNewsTicker:v3",
+  lastNewsLimit: "wmr:lastNewsLimit:v3",
+  lastNewsHoursBack: "wmr:lastNewsHoursBack:v3",
+  newsLanguage: "wmr:newsLanguage:v3", // "ALL" or e.g. "English"
 };
 
 type NewsItem = {
@@ -58,6 +65,19 @@ function toUpperTicker(s: string) {
   return (s || "").toUpperCase().replace(/[^A-Z0-9.\-]/g, "").trim();
 }
 
+function uniq(arr: string[]) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const x of arr) {
+    const t = toUpperTicker(x);
+    if (t && !seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
 function formatSeenDate(seendate?: string) {
   if (!seendate) return "";
   const s = String(seendate);
@@ -70,8 +90,6 @@ function formatSeenDate(seendate?: string) {
 function normLang(s?: string) {
   const v = (s || "").trim();
   if (!v) return "";
-  // Keep the original casing as returned (e.g., "English", "Chinese")
-  // but normalize some common variants.
   const low = v.toLowerCase();
   if (low === "en") return "English";
   if (low === "zh" || low === "cn") return "Chinese";
@@ -86,12 +104,51 @@ function looksEnglish(lang?: string) {
   return l === "english" || l === "en" || l.startsWith("en ");
 }
 
+async function loadSavedTickers(): Promise<string[]> {
+  for (const key of STORAGE_KEYS.savedTickersCandidates) {
+    try {
+      const raw = await AsyncStorage.getItem(key);
+      if (!raw) continue;
+
+      // Accept JSON array ["SPY","QQQ"] or comma string "SPY,QQQ"
+      let vals: any = null;
+
+      try {
+        vals = JSON.parse(raw);
+      } catch {
+        vals = raw;
+      }
+
+      if (Array.isArray(vals)) {
+        const cleaned = uniq(vals.map(String));
+        if (cleaned.length) return cleaned;
+      }
+
+      if (typeof vals === "string") {
+        const parts = vals
+          .replace(/\s+/g, ",")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const cleaned = uniq(parts);
+        if (cleaned.length) return cleaned;
+      }
+    } catch {
+      // ignore and keep trying keys
+    }
+  }
+
+  // Fallback defaults if no saved tickers found
+  return ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"];
+}
+
 export default function NewsTab() {
   const [ticker, setTicker] = useState<string>("TSLA");
   const [limit, setLimit] = useState<string>("10");
   const [hoursBack, setHoursBack] = useState<string>("72");
-  const [selectedLanguage, setSelectedLanguage] = useState<string>("ALL"); // "ALL" or e.g. "English"
+  const [selectedLanguage, setSelectedLanguage] = useState<string>("ALL"); // "ALL" or "English", etc.
 
+  const [savedTickers, setSavedTickers] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [resp, setResp] = useState<NewsResponse | null>(null);
 
@@ -117,7 +174,6 @@ export default function NewsTab() {
     for (const it of resp.items || []) {
       const l = normLang(it.language);
       if (l) langs.add(l);
-      // If an item is English but label is weird/missing, still offer English when any English-looking appears
       if (looksEnglish(it.language)) langs.add("English");
     }
 
@@ -134,7 +190,6 @@ export default function NewsTab() {
 
     if (selectedLanguage === "ALL") return items;
 
-    // Special case: English filtering more forgiving
     if (selectedLanguage === "English") {
       return items.filter((it) => looksEnglish(it.language) || normLang(it.language) === "English");
     }
@@ -173,8 +228,9 @@ export default function NewsTab() {
     }
   }
 
-  async function runFetch() {
-    const { t, lim, hb } = parsed;
+  async function runFetch(forcedTicker?: string) {
+    const { lim, hb } = parsed;
+    const t = toUpperTicker(forcedTicker ?? parsed.t) || "TSLA";
 
     setLoading(true);
     setResp(null);
@@ -205,7 +261,7 @@ export default function NewsTab() {
       setResp({
         ok: false,
         provider: "gdelt",
-        ticker: parsed.t,
+        ticker: t,
         error: e?.message || "Request failed",
         note: "Mobile fetch failed.",
       });
@@ -215,6 +271,10 @@ export default function NewsTab() {
   }
 
   useEffect(() => {
+    // load saved tickers chips (from Home)
+    loadSavedTickers().then(setSavedTickers).catch(() => setSavedTickers([]));
+
+    // load last prefs then auto-fetch
     loadSaved().finally(() => {
       setTimeout(() => {
         runFetch();
@@ -251,11 +311,34 @@ export default function NewsTab() {
     await savePrefs(t, lim, hb, lang);
   }
 
+  async function tapTickerChip(t: string) {
+    const up = toUpperTicker(t);
+    if (!up) return;
+    setTicker(up);
+    await runFetch(up);
+  }
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>News</Text>
 
       <View style={styles.card}>
+        <Text style={styles.label}>Quick tickers</Text>
+        <View style={styles.tickerWrap}>
+          {(savedTickers.length ? savedTickers : ["SPY", "QQQ", "TSLA", "NVDA"]).map((t) => {
+            const active = toUpperTicker(t) === parsed.t;
+            return (
+              <Pressable
+                key={t}
+                onPress={() => tapTickerChip(t)}
+                style={[styles.tickerChip, active && styles.tickerChipActive]}
+              >
+                <Text style={[styles.tickerText, active && styles.tickerTextActive]}>{t}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
         <Text style={styles.label}>Ticker</Text>
         <TextInput
           value={ticker}
@@ -308,12 +391,12 @@ export default function NewsTab() {
           })}
         </View>
 
-        <Pressable style={styles.button} onPress={runFetch} disabled={loading}>
+        <Pressable style={styles.button} onPress={() => runFetch()} disabled={loading}>
           <Text style={styles.buttonText}>{loading ? "Loading..." : "Fetch News"}</Text>
         </Pressable>
 
         <Text style={styles.hint}>
-          This filters headlines on your phone. Backend is unchanged.
+          Tip: tap a ticker chip to fetch instantly. Language filter is client-side.
         </Text>
       </View>
 
@@ -404,6 +487,22 @@ const styles = StyleSheet.create({
 
   row: { flexDirection: "row", gap: 10 },
   rowItem: { flex: 1 },
+
+  tickerWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  tickerChip: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "white",
+  },
+  tickerChipActive: {
+    borderColor: "#111",
+    backgroundColor: "#111",
+  },
+  tickerText: { fontWeight: "800", color: "#111", fontSize: 12 },
+  tickerTextActive: { color: "white" },
 
   langWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   langChip: {
