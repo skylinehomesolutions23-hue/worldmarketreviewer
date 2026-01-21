@@ -343,7 +343,6 @@ export default function NewsTab() {
       });
 
     loadPrefs().finally(() => {
-      // If we got a ticker from Watchlist route, prefer it.
       const tk = toUpperTicker(routeTicker);
       if (tk) setTicker(tk);
 
@@ -354,7 +353,6 @@ export default function NewsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When navigating from Watchlist -> News with a ticker param, update & fetch.
   useEffect(() => {
     const tk = toUpperTicker(routeTicker);
     if (tk && tk !== parsed.t) {
@@ -469,25 +467,19 @@ export default function NewsTab() {
           </View>
 
           <View style={styles.tickerWrap}>
-            {(savedTickers.length ? savedTickers : ["SPY", "QQQ", "TSLA", "NVDA"]).map((t) => {
-              const active = toUpperTicker(t) === parsed.t;
-              return (
-                <View key={t} style={styles.tickerChipRow}>
-                  <Pressable
-                    onPress={() => tapTickerChip(t)}
-                    style={[styles.tickerChip, active && styles.tickerChipActive]}
-                  >
-                    <Text style={[styles.tickerText, active && styles.tickerTextActive]}>{t}</Text>
-                  </Pressable>
+            {(savedTickers.length ? savedTickers : ["SPY", "QQQ", "TSLA", "NVDA"]).map((t) => (
+              <View key={t} style={styles.tickerChipRow}>
+                <Pressable onPress={() => tapTickerChip(t)} style={styles.tickerChip}>
+                  <Text style={styles.tickerText}>{t}</Text>
+                </Pressable>
 
-                  {editTickers ? (
-                    <Pressable onPress={() => removeSavedTicker(t)} style={styles.removeChip}>
-                      <Text style={styles.removeChipText}>✕</Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-              );
-            })}
+                {editTickers ? (
+                  <Pressable onPress={() => removeSavedTicker(t)} style={styles.removeChip}>
+                    <Text style={styles.removeChipText}>✕</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ))}
           </View>
 
           <Text style={styles.label}>Ticker</Text>
@@ -564,7 +556,7 @@ export default function NewsTab() {
             <Text style={styles.buttonText}>{loading ? "Loading..." : "Fetch News"}</Text>
           </Pressable>
 
-          <Text style={styles.hint}>Pull down to refresh.</Text>
+          <Text style={styles.hint}>Pull down to refresh. Tap a watchlist ticker to jump here.</Text>
         </View>
 
         <View style={styles.resultsHeader}>
@@ -590,7 +582,11 @@ export default function NewsTab() {
               </Text>
 
               {filteredItems.map((it, idx) => (
-                <Pressable key={`${it.url}-${idx}`} style={styles.item} onPress={() => openUrl(it.url)}>
+                <Pressable
+                  key={`${it.url}-${idx}`}
+                  style={styles.item}
+                  onPress={() => openUrl(it.url)}
+                >
                   <Text style={styles.itemTitle} numberOfLines={3}>
                     {it.title}
                   </Text>
@@ -686,9 +682,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: "white",
   },
-  tickerChipActive: { borderColor: "#111", backgroundColor: "#111" },
   tickerText: { fontWeight: "800", color: "#111", fontSize: 12 },
-  tickerTextActive: { color: "white" },
   removeChip: {
     width: 24,
     height: 24,
