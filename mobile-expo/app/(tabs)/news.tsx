@@ -138,12 +138,7 @@ async function loadSavedTickers(): Promise<{ key: string; tickers: string[] }> {
 
     if (Array.isArray(vals)) {
       const cleaned = uniq(vals.map(String));
-      return {
-        key,
-        tickers: cleaned.length
-          ? cleaned
-          : ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"],
-      };
+      return { key, tickers: cleaned.length ? cleaned : ["SPY", "QQQ", "TSLA", "NVDA"] };
     }
 
     if (typeof vals === "string") {
@@ -154,16 +149,11 @@ async function loadSavedTickers(): Promise<{ key: string; tickers: string[] }> {
           .map((s) => s.trim())
           .filter(Boolean)
       );
-      return {
-        key,
-        tickers: cleaned.length
-          ? cleaned
-          : ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"],
-      };
+      return { key, tickers: cleaned.length ? cleaned : ["SPY", "QQQ", "TSLA", "NVDA"] };
     }
   } catch {}
 
-  return { key, tickers: ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"] };
+  return { key, tickers: ["SPY", "QQQ", "TSLA", "NVDA"] };
 }
 
 async function saveTickersToKey(key: string, tickers: string[]) {
@@ -178,7 +168,8 @@ export default function NewsTab() {
   const [limit, setLimit] = useState<string>("10");
   const [hoursBack, setHoursBack] = useState<string>("72");
 
-  const [selectedLanguage, setSelectedLanguage] = useState<string>("ALL");
+  // Default to English (feels pro). User can switch to All.
+  const [selectedLanguage, setSelectedLanguage] = useState<string>("English");
   const [selectedCountry, setSelectedCountry] = useState<string>("ALL");
 
   const [savedTickers, setSavedTickers] = useState<string[]>([]);
@@ -208,8 +199,8 @@ export default function NewsTab() {
   }, [ticker, limit, hoursBack]);
 
   const availableLanguages = useMemo(() => {
-    if (!resp || !resp.ok) return ["ALL"];
-    const langs = new Set<string>(["ALL"]);
+    if (!resp || !resp.ok) return ["ALL", "English"];
+    const langs = new Set<string>(["ALL", "English"]);
     for (const it of resp.items || []) {
       const l = normLang(it.language);
       if (l) langs.add(l);
@@ -218,6 +209,8 @@ export default function NewsTab() {
     return Array.from(langs).sort((a, b) => {
       if (a === "ALL") return -1;
       if (b === "ALL") return 1;
+      if (a === "English") return -1;
+      if (b === "English") return 1;
       return a.localeCompare(b);
     });
   }, [resp]);
@@ -264,6 +257,8 @@ export default function NewsTab() {
       if (t) setTicker(toUpperTicker(t) || "TSLA");
       if (lim) setLimit(String(lim));
       if (hb) setHoursBack(String(hb));
+
+      // If unset, default stays English
       if (lang) setSelectedLanguage(lang);
       if (country) setSelectedCountry(country);
     } catch {}
@@ -339,7 +334,7 @@ export default function NewsTab() {
       })
       .catch(() => {
         setSavedTickersKey(STORAGE_KEYS.savedTickersDefaultWrite);
-        setSavedTickers(["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"]);
+        setSavedTickers(["SPY", "QQQ", "TSLA", "NVDA"]);
       });
 
     loadPrefs().finally(() => {
@@ -363,7 +358,10 @@ export default function NewsTab() {
   }, [routeTicker]);
 
   useEffect(() => {
-    if (!availableLanguages.includes(selectedLanguage)) setSelectedLanguage("ALL");
+    // If current selection isn't available, fallback to English, then ALL
+    if (!availableLanguages.includes(selectedLanguage)) {
+      setSelectedLanguage(availableLanguages.includes("English") ? "English" : "ALL");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [availableLanguages.join("|")]);
 
@@ -556,7 +554,7 @@ export default function NewsTab() {
             <Text style={styles.buttonText}>{loading ? "Loading..." : "Fetch News"}</Text>
           </Pressable>
 
-          <Text style={styles.hint}>Pull down to refresh. Tap a watchlist ticker to jump here.</Text>
+          <Text style={styles.hint}>Defaults to English for cleaner headlines. Switch to All anytime.</Text>
         </View>
 
         <View style={styles.resultsHeader}>
