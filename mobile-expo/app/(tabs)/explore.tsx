@@ -1,112 +1,127 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import React from "react";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 
-import { Collapsible } from '@/components/ui/collapsible';
-import { ExternalLink } from '@/components/external-link';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Fonts } from '@/constants/theme';
-
-export default function TabTwoScreen() {
+export default function ExploreTab() {
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#D0D0D0', dark: '#353636' }}
-      headerImage={
-        <IconSymbol
-          size={310}
-          color="#808080"
-          name="chevron.left.forwardslash.chevron.right"
-          style={styles.headerImage}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText
-          type="title"
-          style={{
-            fontFamily: Fonts.rounded,
-          }}>
-          Explore
-        </ThemedText>
-      </ThemedView>
-      <ThemedText>This app includes example code to help you get started.</ThemedText>
-      <Collapsible title="File-based routing">
-        <ThemedText>
-          This app has two screens:{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/explore.tsx</ThemedText>
-        </ThemedText>
-        <ThemedText>
-          The layout file in <ThemedText type="defaultSemiBold">app/(tabs)/_layout.tsx</ThemedText>{' '}
-          sets up the tab navigator.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/router/introduction">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Android, iOS, and web support">
-        <ThemedText>
-          You can open this project on Android, iOS, and the web. To open the web version, press{' '}
-          <ThemedText type="defaultSemiBold">w</ThemedText> in the terminal running this project.
-        </ThemedText>
-      </Collapsible>
-      <Collapsible title="Images">
-        <ThemedText>
-          For static images, you can use the <ThemedText type="defaultSemiBold">@2x</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">@3x</ThemedText> suffixes to provide files for
-          different screen densities
-        </ThemedText>
-        <Image
-          source={require('@/assets/images/react-logo.png')}
-          style={{ width: 100, height: 100, alignSelf: 'center' }}
-        />
-        <ExternalLink href="https://reactnative.dev/docs/images">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Light and dark mode components">
-        <ThemedText>
-          This template has light and dark mode support. The{' '}
-          <ThemedText type="defaultSemiBold">useColorScheme()</ThemedText> hook lets you inspect
-          what the user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Animations">
-        <ThemedText>
-          This template includes an example of an animated component. The{' '}
-          <ThemedText type="defaultSemiBold">components/HelloWave.tsx</ThemedText> component uses
-          the powerful{' '}
-          <ThemedText type="defaultSemiBold" style={{ fontFamily: Fonts.mono }}>
-            react-native-reanimated
-          </ThemedText>{' '}
-          library to create a waving hand animation.
-        </ThemedText>
-        {Platform.select({
-          ios: (
-            <ThemedText>
-              The <ThemedText type="defaultSemiBold">components/ParallaxScrollView.tsx</ThemedText>{' '}
-              component provides a parallax effect for the header image.
-            </ThemedText>
-          ),
-        })}
-      </Collapsible>
-    </ParallaxScrollView>
+    <ScrollView contentContainerStyle={styles.container}>
+      <Text style={styles.title}>Explore</Text>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>What this app does</Text>
+        <Text style={styles.text}>
+          WorldMarketReviewer analyzes historical market data and uses
+          walk-forward machine learning models to estimate the probability that
+          a stock or ETF will be higher after a fixed number of trading days.
+        </Text>
+        <Text style={styles.text}>
+          This is not a prediction of the future — it is a probability-based
+          signal designed to help compare opportunities objectively.
+        </Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>How predictions work</Text>
+        <Text style={styles.text}>
+          • Daily prices are converted into technical features{"\n"}
+          • Models are trained using past data only{"\n"}
+          • Each ticker gets a probability of going UP or DOWN{"\n"}
+          • Confidence increases the farther the probability is from 50%
+        </Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Understanding confidence</Text>
+        <Text style={styles.text}>
+          LOW confidence means the model sees a near coin-flip outcome.{"\n\n"}
+          MEDIUM confidence means a modest edge.{"\n\n"}
+          HIGH confidence means the model historically performed better in
+          similar conditions — but losses are still possible.
+        </Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>How to use each tab</Text>
+        <Text style={styles.text}>
+          Home — Run predictions for selected tickers{"\n\n"}
+          Compare — Verify recent price moves visually{"\n\n"}
+          Watchlist — Track up to 10 tickers together{"\n\n"}
+          News — See recent headlines that may affect price{"\n\n"}
+          Accuracy — Measure how past predictions performed
+        </Text>
+      </View>
+
+      <View style={styles.cardWarn}>
+        <Text style={styles.cardTitle}>Important note</Text>
+        <Text style={styles.warnText}>
+          This app is for research and educational purposes only. Markets are
+          uncertain and no model is always correct. Do not trade money you
+          cannot afford to lose.
+        </Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Coming soon (Pro)</Text>
+        <Text style={styles.text}>
+          • More tracked tickers{"\n"}
+          • Price & confidence alerts{"\n"}
+          • Faster and higher-frequency models{"\n"}
+          • Longer accuracy history{"\n"}
+          • Advanced filters and signals
+        </Text>
+      </View>
+
+      <Text style={styles.footer}>
+        You are currently using the public testing version.
+      </Text>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  headerImage: {
-    color: '#808080',
-    bottom: -90,
-    left: -35,
-    position: 'absolute',
+  container: {
+    padding: 16,
+    gap: 12,
+    paddingBottom: 40,
   },
-  titleContainer: {
-    flexDirection: 'row',
+  title: {
+    fontSize: 28,
+    fontWeight: "800",
+    marginBottom: 4,
+  },
+  card: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 12,
+    padding: 14,
     gap: 8,
+    backgroundColor: "white",
+  },
+  cardWarn: {
+    borderWidth: 1,
+    borderColor: "#f5c77a",
+    backgroundColor: "#fff4e3",
+    borderRadius: 12,
+    padding: 14,
+    gap: 8,
+  },
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: "900",
+  },
+  text: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: "#333",
+  },
+  warnText: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: "#7a4a00",
+  },
+  footer: {
+    textAlign: "center",
+    color: "#666",
+    fontSize: 12,
+    marginTop: 12,
   },
 });
