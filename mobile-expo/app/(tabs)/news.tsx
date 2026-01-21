@@ -15,13 +15,11 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
 const STORAGE_KEYS = {
-  lastNewsTicker: "wmr:lastNewsTicker:v1",
-  lastNewsLimit: "wmr:lastNewsLimit:v1",
-  lastNewsHoursBack: "wmr:lastNewsHoursBack:v1",
-  newsLangMode: "wmr:newsLangMode:v1", // "all" | "en"
+  lastNewsTicker: "wmr:lastNewsTicker:v2",
+  lastNewsLimit: "wmr:lastNewsLimit:v2",
+  lastNewsHoursBack: "wmr:lastNewsHoursBack:v2",
+  newsLanguage: "wmr:newsLanguage:v2", // "ALL" or "English" etc
 };
-
-type LangMode = "all" | "en";
 
 type NewsItem = {
   title: string;
@@ -69,17 +67,30 @@ function formatSeenDate(seendate?: string) {
   return s;
 }
 
-function isEnglishItem(it: NewsItem): boolean {
-  const lang = (it.language || "").trim().toLowerCase();
-  // GDELT tends to return "English" exactly, but we accept a few variants.
-  return lang === "english" || lang === "en" || lang.startsWith("en ");
+function normLang(s?: string) {
+  const v = (s || "").trim();
+  if (!v) return "";
+  // Keep the original casing as returned (e.g., "English", "Chinese")
+  // but normalize some common variants.
+  const low = v.toLowerCase();
+  if (low === "en") return "English";
+  if (low === "zh" || low === "cn") return "Chinese";
+  if (low === "hi") return "Hindi";
+  if (low === "he") return "Hebrew";
+  if (low === "es") return "Spanish";
+  return v;
+}
+
+function looksEnglish(lang?: string) {
+  const l = (lang || "").trim().toLowerCase();
+  return l === "english" || l === "en" || l.startsWith("en ");
 }
 
 export default function NewsTab() {
   const [ticker, setTicker] = useState<string>("TSLA");
   const [limit, setLimit] = useState<string>("10");
   const [hoursBack, setHoursBack] = useState<string>("72");
-  const [langMode, setLangMode] = useState<LangMode>("all");
+  const [selectedLanguage, setSelectedLanguage] = useState<string>("ALL"); // "ALL" or e.g. "English"
 
   const [loading, setLoading] = useState(false);
   const [resp, setResp] = useState<NewsResponse | null>(null);
@@ -98,58 +109,81 @@ export default function NewsTab() {
     return { t, lim, hb };
   }, [ticker, limit, hoursBack]);
 
+  const availableLanguages = useMemo(() => {
+    if (!resp || !resp.ok) return ["ALL"];
+    const langs = new Set<string>();
+    langs.add("ALL");
+
+    for (const it of resp.items || []) {
+      const l = normLang(it.language);
+      if (l) langs.add(l);
+      // If an item is English but label is weird/missing, still offer English when any English-looking appears
+      if (looksEnglish(it.language)) langs.add("English");
+    }
+
+    return Array.from(langs).sort((a, b) => {
+      if (a === "ALL") return -1;
+      if (b === "ALL") return 1;
+      return a.localeCompare(b);
+    });
+  }, [resp]);
+
   const filteredItems = useMemo(() => {
     if (!resp || !resp.ok) return [];
-    if (langMode === "en") return (resp.items || []).filter(isEnglishItem);
-    return resp.items || [];
-  }, [resp, langMode]);
+    const items = resp.items || [];
+
+    if (selectedLanguage === "ALL") return items;
+
+    // Special case: English filtering more forgiving
+    if (selectedLanguage === "English") {
+      return items.filter((it) => looksEnglish(it.language) || normLang(it.language) === "English");
+    }
+
+    return items.filter((it) => normLang(it.language) === selectedLanguage);
+  }, [resp, selectedLanguage]);
 
   async function loadSaved() {
     try {
-      const [t, lim, hb, lm] = await Promise.all([
+      const [t, lim, hb, lang] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEYS.lastNewsTicker),
         AsyncStorage.getItem(STORAGE_KEYS.lastNewsLimit),
         AsyncStorage.getItem(STORAGE_KEYS.lastNewsHoursBack),
-        AsyncStorage.getItem(STORAGE_KEYS.newsLangMode),
+        AsyncStorage.getItem(STORAGE_KEYS.newsLanguage),
       ]);
 
       if (t) setTicker(toUpperTicker(t) || "TSLA");
       if (lim) setLimit(String(lim));
       if (hb) setHoursBack(String(hb));
-
-      if (lm === "all" || lm === "en") setLangMode(lm);
+      if (lang) setSelectedLanguage(lang);
     } catch {
       // ignore
     }
   }
 
-  async function savePrefs(t: string, lim: number, hb: number, lm: LangMode) {
+  async function savePrefs(t: string, lim: number, hb: number, lang: string) {
     try {
       await Promise.all([
         AsyncStorage.setItem(STORAGE_KEYS.lastNewsTicker, t),
         AsyncStorage.setItem(STORAGE_KEYS.lastNewsLimit, String(lim)),
         AsyncStorage.setItem(STORAGE_KEYS.lastNewsHoursBack, String(hb)),
-        AsyncStorage.setItem(STORAGE_KEYS.newsLangMode, lm),
+        AsyncStorage.setItem(STORAGE_KEYS.newsLanguage, lang),
       ]);
     } catch {
       // ignore
     }
   }
 
-  async function runFetch(nextLangMode?: LangMode) {
+  async function runFetch() {
     const { t, lim, hb } = parsed;
-    const lm = nextLangMode ?? langMode;
 
     setLoading(true);
     setResp(null);
 
-    await savePrefs(t, lim, hb, lm);
+    await savePrefs(t, lim, hb, selectedLanguage);
 
     const url = `${API_BASE}/api/news?ticker=${encodeURIComponent(
       t
-    )}&limit=${encodeURIComponent(String(lim))}&hours_back=${encodeURIComponent(
-      String(hb)
-    )}`;
+    )}&limit=${encodeURIComponent(String(lim))}&hours_back=${encodeURIComponent(String(hb))}`;
 
     try {
       const res = await fetch(url, { method: "GET" });
@@ -182,13 +216,20 @@ export default function NewsTab() {
 
   useEffect(() => {
     loadSaved().finally(() => {
-      // auto-fetch after loading saved prefs
       setTimeout(() => {
         runFetch();
       }, 50);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // If saved language no longer exists for this ticker/time window, fall back to ALL.
+  useEffect(() => {
+    if (!availableLanguages.includes(selectedLanguage)) {
+      setSelectedLanguage("ALL");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [availableLanguages.join("|")]);
 
   async function openUrl(url?: string) {
     if (!url) return;
@@ -204,11 +245,10 @@ export default function NewsTab() {
     }
   }
 
-  function setLang(lm: LangMode) {
-    setLangMode(lm);
-    // persist immediately (no need to refetch; filter is client-side)
+  async function setLang(lang: string) {
+    setSelectedLanguage(lang);
     const { t, lim, hb } = parsed;
-    savePrefs(t, lim, hb, lm);
+    await savePrefs(t, lim, hb, lang);
   }
 
   return (
@@ -251,32 +291,29 @@ export default function NewsTab() {
         </View>
 
         <Text style={styles.label}>Language</Text>
-        <View style={styles.toggleRow}>
-          <Pressable
-            onPress={() => setLang("all")}
-            style={[styles.toggleBtn, langMode === "all" && styles.toggleBtnActive]}
-          >
-            <Text style={[styles.toggleText, langMode === "all" && styles.toggleTextActive]}>
-              All
-            </Text>
-          </Pressable>
-
-          <Pressable
-            onPress={() => setLang("en")}
-            style={[styles.toggleBtn, langMode === "en" && styles.toggleBtnActive]}
-          >
-            <Text style={[styles.toggleText, langMode === "en" && styles.toggleTextActive]}>
-              English only
-            </Text>
-          </Pressable>
+        <View style={styles.langWrap}>
+          {availableLanguages.map((lang) => {
+            const active = lang === selectedLanguage;
+            return (
+              <Pressable
+                key={lang}
+                onPress={() => setLang(lang)}
+                style={[styles.langChip, active && styles.langChipActive]}
+              >
+                <Text style={[styles.langText, active && styles.langTextActive]}>
+                  {lang === "ALL" ? "All" : lang}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
 
-        <Pressable style={styles.button} onPress={() => runFetch()} disabled={loading}>
+        <Pressable style={styles.button} onPress={runFetch} disabled={loading}>
           <Text style={styles.buttonText}>{loading ? "Loading..." : "Fetch News"}</Text>
         </Pressable>
 
         <Text style={styles.hint}>
-          Uses your backend (/api/news). Language filtering is applied on your phone (fast).
+          This filters headlines on your phone. Backend is unchanged.
         </Text>
       </View>
 
@@ -291,13 +328,14 @@ export default function NewsTab() {
         ) : resp.ok ? (
           filteredItems.length === 0 ? (
             <Text style={styles.muted}>
-              No {langMode === "en" ? "English" : ""} articles found for {resp.ticker}.
+              No headlines found for {resp.ticker}
+              {selectedLanguage !== "ALL" ? ` (${selectedLanguage})` : ""}.
             </Text>
           ) : (
             <>
               <Text style={styles.countLine}>
-                Showing {filteredItems.length} of {resp.items.length} items
-                {langMode === "en" ? " (English only)" : ""}
+                Showing {filteredItems.length} of {resp.items.length}
+                {selectedLanguage !== "ALL" ? ` • ${selectedLanguage}` : ""}
               </Text>
 
               {filteredItems.map((it, idx) => (
@@ -312,7 +350,7 @@ export default function NewsTab() {
                   <Text style={styles.itemMeta}>
                     {(it.domain || "unknown").toString()}
                     {it.seendate ? ` • ${formatSeenDate(it.seendate)}` : ""}
-                    {it.language ? ` • ${it.language}` : ""}
+                    {it.language ? ` • ${normLang(it.language)}` : ""}
                   </Text>
                   <Text style={styles.itemUrl} numberOfLines={1}>
                     {it.url}
@@ -367,22 +405,21 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", gap: 10 },
   rowItem: { flex: 1 },
 
-  toggleRow: { flexDirection: "row", gap: 10 },
-  toggleBtn: {
-    flex: 1,
+  langWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  langChip: {
     borderWidth: 1,
     borderColor: "#ddd",
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: "center",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 999,
     backgroundColor: "white",
   },
-  toggleBtnActive: {
+  langChipActive: {
     borderColor: "#111",
     backgroundColor: "#111",
   },
-  toggleText: { fontWeight: "800", color: "#111" },
-  toggleTextActive: { color: "white" },
+  langText: { fontWeight: "800", color: "#111", fontSize: 12 },
+  langTextActive: { color: "white" },
 
   button: {
     marginTop: 4,
