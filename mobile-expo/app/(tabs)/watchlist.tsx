@@ -103,8 +103,6 @@ function fmtProb(x?: number | null) {
 
 export default function WatchlistTab() {
   const [tickers, setTickers] = useState<string[]>([]);
-  const [selected, setSelected] = useState<string>("");
-
   const [loading, setLoading] = useState(false);
   const [preds, setPreds] = useState<Prediction[]>([]);
   const [lastUpdated, setLastUpdated] = useState<string>("");
@@ -113,14 +111,8 @@ export default function WatchlistTab() {
 
   useEffect(() => {
     loadSavedTickers()
-      .then((t) => {
-        setTickers(t);
-        setSelected(t[0] || "SPY");
-      })
-      .catch(() => {
-        setTickers(["SPY", "QQQ", "TSLA"]);
-        setSelected("SPY");
-      });
+      .then((t) => setTickers(t))
+      .catch(() => setTickers(["SPY", "QQQ", "TSLA"]));
   }, []);
 
   async function runPredictions() {
@@ -143,12 +135,17 @@ export default function WatchlistTab() {
       });
 
       const json = await res.json();
-
       const got: Prediction[] = Array.isArray(json?.predictions) ? json.predictions : [];
-      setPreds(got);
 
-      const now = new Date();
-      setLastUpdated(now.toLocaleString());
+      // Sort: highest confidence first, then highest prob_up for UP
+      got.sort((a, b) => {
+        const ar = (a.confidence_score ?? 0) - (b.confidence_score ?? 0);
+        if (ar !== 0) return -ar;
+        return (b.prob_up ?? 0) - (a.prob_up ?? 0);
+      });
+
+      setPreds(got);
+      setLastUpdated(new Date().toLocaleString());
     } catch (e: any) {
       Alert.alert("Watchlist error", e?.message || "Failed to fetch predictions");
     } finally {
@@ -158,35 +155,25 @@ export default function WatchlistTab() {
 
   function openNews(t: string) {
     const tk = toUpperTicker(t);
+    // NOTE: News tab might not accept params yet — that’s OK for now.
+    // Next step (News tab) we’ll make it auto-fill ticker from params.
     router.push({ pathname: "/news", params: { ticker: tk } });
   }
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Watchlist</Text>
-      <Text style={styles.sub}>
-        Tracks your saved tickers (max 10). Tap a ticker to open News.
-      </Text>
+      <Text style={styles.sub}>Tracks your saved tickers (max 10).</Text>
 
       <View style={styles.card}>
-        <Text style={styles.label}>Tracked tickers</Text>
+        <Text style={styles.label}>Tracked</Text>
 
         <View style={styles.chips}>
-          {(top10.length ? top10 : ["SPY", "QQQ", "TSLA"]).map((t) => {
-            const active = toUpperTicker(t) === toUpperTicker(selected);
-            return (
-              <Pressable
-                key={t}
-                onPress={() => {
-                  setSelected(t);
-                  openNews(t);
-                }}
-                style={[styles.chip, active && styles.chipActive]}
-              >
-                <Text style={[styles.chipText, active && styles.chipTextActive]}>{t}</Text>
-              </Pressable>
-            );
-          })}
+          {(top10.length ? top10 : ["SPY", "QQQ", "TSLA"]).map((t) => (
+            <Pressable key={t} onPress={() => openNews(t)} style={styles.chip}>
+              <Text style={styles.chipText}>{t}</Text>
+            </Pressable>
+          ))}
         </View>
 
         <Pressable style={styles.button} onPress={runPredictions} disabled={loading}>
@@ -198,7 +185,7 @@ export default function WatchlistTab() {
         {lastUpdated ? (
           <Text style={styles.hint}>Last updated: {lastUpdated}</Text>
         ) : (
-          <Text style={styles.hint}>Tip: run this daily to test real accuracy over weeks.</Text>
+          <Text style={styles.hint}>Run this daily to build a real accuracy track record.</Text>
         )}
       </View>
 
@@ -219,8 +206,8 @@ export default function WatchlistTab() {
               </View>
 
               <Text style={styles.itemMeta}>
-                prob_up: {fmtProb(p.prob_up)} • confidence: {(p.confidence || "—").toString()} • exp:
-                {` ${fmtPct(p.exp_return)}`}
+                prob_up: {fmtProb(p.prob_up)} • confidence: {(p.confidence || "—").toString()} • exp:{" "}
+                {fmtPct(p.exp_return)}
               </Text>
 
               <Text style={styles.itemMeta}>
@@ -265,9 +252,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: "white",
   },
-  chipActive: { borderColor: "#111", backgroundColor: "#111" },
   chipText: { fontWeight: "800", color: "#111", fontSize: 12 },
-  chipTextActive: { color: "white" },
 
   button: {
     backgroundColor: "#111",

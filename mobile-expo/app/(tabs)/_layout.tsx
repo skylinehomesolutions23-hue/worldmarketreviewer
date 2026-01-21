@@ -38,6 +38,16 @@ export default function TabLayout() {
       />
 
       <Tabs.Screen
+        name="accuracy"
+        options={{
+          title: "Accuracy",
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={28} name="chart.bar.fill" color={color} />
+          ),
+        }}
+      />
+
+      <Tabs.Screen
         name="news"
         options={{
           title: "News",
@@ -53,16 +63,6 @@ export default function TabLayout() {
           title: "Watchlist",
           tabBarIcon: ({ color }) => (
             <IconSymbol size={28} name="star.fill" color={color} />
-          ),
-        }}
-      />
-
-      <Tabs.Screen
-        name="accuracy"
-        options={{
-          title: "Accuracy",
-          tabBarIcon: ({ color }) => (
-            <IconSymbol size={28} name="chart.bar.fill" color={color} />
           ),
         }}
       />
