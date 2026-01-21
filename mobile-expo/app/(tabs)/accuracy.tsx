@@ -1,4 +1,3 @@
-// mobile-expo/app/(tabs)/accuracy.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -15,461 +14,483 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
 const STORAGE_KEYS = {
-  savedTickers: "wmr:savedTickers:v3",
-  lastTickersInput: "wmr:lastTickersInput:v3",
-  lastHorizon: "wmr:lastHorizon:v3",
-  // NEW: local cooldown for "Score now"
-  lastScoreTapUtc: "wmr:lastScoreTapUtc:v1",
+  savedTickersCandidates: [
+    "wmr:savedTickers:v3",
+    "wmr:savedTickers:v2",
+    "wmr:savedTickers:v1",
+    "savedTickers",
+  ],
+  lastAccuracyTicker: "wmr:lastAccuracyTicker:v3",
+  lastAccuracyHorizon: "wmr:lastAccuracyHorizon:v3",
+  lastAccuracyLimit: "wmr:lastAccuracyLimit:v3",
 };
 
-type MetricsResponse = {
-  ticker?: string;
-  horizon_days?: number;
-  count?: number;
-  hit_rate?: number;
+type ReportCard = {
+  ticker: string;
+  horizon_days: number;
+  samples?: number;
+  overall_hit_rate?: number | null;
   avg_realized_return?: number | null;
-
-  // old API shape (if you ever switch back)
-  calibration?: { lo: number; hi: number; count: number; up_rate: number | null }[];
-
-  // new API shape (your current api.py)
-  by_confidence?: { label: string; lo: number; hi: number; count: number; hit_rate: number | null }[];
-
+  high_confidence?: { label: string; lo: number; hi: number; count: number; hit_rate: number | null } | null;
+  by_confidence?: Array<{ label: string; lo: number; hi: number; count: number; hit_rate: number | null }>;
   note?: string;
-  [k: string]: any;
 };
 
-type ScoreResponse = {
-  ok?: boolean;
-  requested?: number;
-  fetched?: number;
-  counts?: Record<string, number>;
-  note?: string;
-  sample?: any[];
-  [k: string]: any;
+type ScoreRow = {
+  id: number;
+  ticker: string;
+  generated_at: string;
+  horizon_days: number;
+  prob_up?: number | null;
+  direction?: string | null;
+  exp_return?: number | null;
+  as_of_date?: string | null;
+  as_of_close?: number | null;
+  realized_return?: number | null;
+  realized_direction?: string | null;
+  scored_at?: string | null;
 };
 
-function normalizeTickers(input: string): string[] {
-  return input
-    .split(/[,\s]+/g)
-    .map((t) => t.trim().toUpperCase())
-    .filter(Boolean)
-    .filter((t, idx, arr) => arr.indexOf(t) === idx);
+function toUpperTicker(s: string) {
+  return (s || "").toUpperCase().replace(/[^A-Z0-9.\-]/g, "").trim();
 }
 
-function fmtPct(x: any, digits = 1): string {
-  const n = typeof x === "number" ? x : Number(x);
-  if (!Number.isFinite(n)) return "-";
+function fmtPct(x?: number | null, digits = 1) {
+  if (x === null || x === undefined) return "—";
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
   return `${(n * 100).toFixed(digits)}%`;
 }
 
-async function safeJson(res: Response) {
-  const txt = await res.text();
-  try {
-    return JSON.parse(txt);
-  } catch {
-    return { raw: txt };
-  }
+function fmtProb(x?: number | null) {
+  if (x === null || x === undefined) return "—";
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  return `${(n * 100).toFixed(0)}%`;
 }
 
-function nowUtcMs(): number {
-  return Date.now();
-}
+async function loadSavedTickers(): Promise<string[]> {
+  for (const key of STORAGE_KEYS.savedTickersCandidates) {
+    try {
+      const raw = await AsyncStorage.getItem(key);
+      if (!raw) continue;
 
-export default function AccuracyScreen() {
-  const [savedTickers, setSavedTickers] = useState<string[]>(["SPY", "QQQ"]);
-  const [ticker, setTicker] = useState<string>("SPY");
-  const [horizonDays, setHorizonDays] = useState<number>(5);
-
-  const [loadingMetrics, setLoadingMetrics] = useState<boolean>(false);
-  const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
-  const [metricsErr, setMetricsErr] = useState<string>("");
-
-  const [loadingScore, setLoadingScore] = useState<boolean>(false);
-  const [scoreResp, setScoreResp] = useState<ScoreResponse | null>(null);
-
-  const [cooldownLeftSec, setCooldownLeftSec] = useState<number>(0);
-
-  useEffect(() => {
-    (async () => {
+      let vals: any = null;
       try {
-        const [saved, lastInput, lastH] = await Promise.all([
-          AsyncStorage.getItem(STORAGE_KEYS.savedTickers),
-          AsyncStorage.getItem(STORAGE_KEYS.lastTickersInput),
-          AsyncStorage.getItem(STORAGE_KEYS.lastHorizon),
-        ]);
-
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed) && parsed.length) {
-            setSavedTickers(parsed.map(String).map((x) => x.toUpperCase()));
-          }
-        }
-
-        const fromInput = lastInput ? normalizeTickers(String(lastInput)) : [];
-        if (fromInput.length) setTicker(fromInput[0]);
-
-        if (lastH) {
-          const n = Number(lastH);
-          if (Number.isFinite(n) && n > 0) setHorizonDays(n);
-        }
+        vals = JSON.parse(raw);
       } catch {
-        // ignore
-      }
-    })();
-  }, []);
-
-  const quickTickers = useMemo(() => {
-    const base = [...savedTickers];
-    if (!base.includes("SPY")) base.unshift("SPY");
-    return base.slice(0, 15);
-  }, [savedTickers]);
-
-  async function fetchMetrics(tk?: string, h?: number) {
-    const t = (tk ?? ticker).trim().toUpperCase();
-    const hd = h ?? horizonDays;
-
-    if (!t) return;
-
-    setLoadingMetrics(true);
-    setMetrics(null);
-    setMetricsErr("");
-
-    try {
-      const url = `${API_BASE}/api/metrics?ticker=${encodeURIComponent(
-        t
-      )}&horizon_days=${encodeURIComponent(String(hd))}&limit=500`;
-
-      const res = await fetch(url);
-      const data = (await safeJson(res)) as MetricsResponse;
-
-      if (!res.ok) {
-        setMetricsErr(`HTTP ${res.status}: ${JSON.stringify(data).slice(0, 300)}`);
-        return;
+        vals = raw;
       }
 
-      setMetrics(data);
-    } catch (e: any) {
-      setMetricsErr(String(e?.message || e));
-    } finally {
-      setLoadingMetrics(false);
-    }
-  }
-
-  // Cooldown: 30 minutes
-  const SCORE_COOLDOWN_MS = 30 * 60 * 1000;
-
-  async function checkCooldown(): Promise<boolean> {
-    try {
-      const last = await AsyncStorage.getItem(STORAGE_KEYS.lastScoreTapUtc);
-      const lastMs = last ? Number(last) : 0;
-      const now = nowUtcMs();
-      const diff = now - (Number.isFinite(lastMs) ? lastMs : 0);
-      if (diff < SCORE_COOLDOWN_MS) {
-        const left = Math.ceil((SCORE_COOLDOWN_MS - diff) / 1000);
-        setCooldownLeftSec(left);
-        Alert.alert(
-          "Please wait",
-          `To avoid hammering the free backend, you can score again in ~${Math.ceil(left / 60)} min.`
-        );
-        return false;
+      if (Array.isArray(vals)) {
+        const out = Array.from(new Set(vals.map((x: any) => toUpperTicker(String(x))).filter(Boolean)));
+        if (out.length) return out;
       }
-      return true;
-    } catch {
-      return true;
-    }
-  }
 
-  async function stampCooldown() {
-    try {
-      await AsyncStorage.setItem(STORAGE_KEYS.lastScoreTapUtc, String(nowUtcMs()));
-      setCooldownLeftSec(0);
+      if (typeof vals === "string") {
+        const parts = vals
+          .replace(/\s+/g, ",")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map(toUpperTicker)
+          .filter(Boolean);
+        const out = Array.from(new Set(parts));
+        if (out.length) return out;
+      }
     } catch {}
   }
 
-  async function scoreNow() {
-    const ok = await checkCooldown();
-    if (!ok) return;
+  return ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"];
+}
 
-    setLoadingScore(true);
-    setScoreResp(null);
+export default function AccuracyTab() {
+  const [savedTickers, setSavedTickers] = useState<string[]>([]);
+  const [ticker, setTicker] = useState("SPY");
+  const [horizon, setHorizon] = useState("5");
+  const [limit, setLimit] = useState("200");
+
+  const [scoring, setScoring] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const [report, setReport] = useState<ReportCard | null>(null);
+  const [rows, setRows] = useState<ScoreRow[]>([]);
+
+  const parsed = useMemo(() => {
+    const t = toUpperTicker(ticker) || "SPY";
+
+    let h = parseInt(horizon, 10);
+    if (!Number.isFinite(h)) h = 5;
+    h = Math.max(1, Math.min(60, h));
+
+    let lim = parseInt(limit, 10);
+    if (!Number.isFinite(lim)) lim = 200;
+    lim = Math.max(10, Math.min(2000, lim));
+
+    return { t, h, lim };
+  }, [ticker, horizon, limit]);
+
+  useEffect(() => {
+    loadSavedTickers().then(setSavedTickers).catch(() => setSavedTickers(["SPY", "QQQ", "TSLA"]));
+
+    (async () => {
+      try {
+        const [t, h, lim] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_KEYS.lastAccuracyTicker),
+          AsyncStorage.getItem(STORAGE_KEYS.lastAccuracyHorizon),
+          AsyncStorage.getItem(STORAGE_KEYS.lastAccuracyLimit),
+        ]);
+        if (t) setTicker(toUpperTicker(t) || "SPY");
+        if (h) setHorizon(String(h));
+        if (lim) setLimit(String(lim));
+      } catch {}
+    })();
+  }, []);
+
+  async function savePrefs(t: string, h: number, lim: number) {
+    try {
+      await Promise.all([
+        AsyncStorage.setItem(STORAGE_KEYS.lastAccuracyTicker, t),
+        AsyncStorage.setItem(STORAGE_KEYS.lastAccuracyHorizon, String(h)),
+        AsyncStorage.setItem(STORAGE_KEYS.lastAccuracyLimit, String(lim)),
+      ]);
+    } catch {}
+  }
+
+  async function fetchReportAndScoreboard() {
+    const { t, h, lim } = parsed;
+    setLoading(true);
+    setReport(null);
+    setRows([]);
+
+    await savePrefs(t, h, lim);
 
     try {
-      await stampCooldown();
+      const [r1, r2] = await Promise.all([
+        fetch(`${API_BASE}/api/report_card?ticker=${encodeURIComponent(t)}&horizon_days=${h}&limit=${lim}`),
+        fetch(`${API_BASE}/api/scoreboard?ticker=${encodeURIComponent(t)}&horizon_days=${h}&limit=${lim}`),
+      ]);
 
-      const res = await fetch(`${API_BASE}/api/score_predictions?limit=500&max_parallel=4`, {
-        method: "POST",
-      });
-      const data = (await safeJson(res)) as ScoreResponse;
+      const j1 = await r1.json();
+      const j2 = await r2.json();
 
-      setScoreResp(data);
-
-      if (!res.ok) {
-        Alert.alert("Score failed", `HTTP ${res.status}`);
-      } else {
-        await fetchMetrics();
-      }
+      setReport(j1);
+      setRows(Array.isArray(j2?.rows) ? j2.rows : []);
     } catch (e: any) {
-      Alert.alert("Score failed", String(e?.message || e));
+      Alert.alert("Accuracy error", e?.message || "Failed to load accuracy data");
     } finally {
-      setLoadingScore(false);
+      setLoading(false);
     }
   }
 
-  useEffect(() => {
-    // auto-load metrics on first enter
-    fetchMetrics().catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  async function runScoring() {
+    setScoring(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/score_predictions?limit=500&max_parallel=6&source_pref=auto`, {
+        method: "POST",
+      });
+      const j = await res.json();
+
+      const scored = j?.counts?.scored ?? 0;
+      const notMatured = j?.counts?.not_matured ?? 0;
+
+      Alert.alert(
+        "Scoring complete",
+        `Scored: ${scored}\nNot matured yet: ${notMatured}\n\nNow refresh to see updated accuracy.`
+      );
+    } catch (e: any) {
+      Alert.alert("Scoring error", e?.message || "Failed to score predictions");
+    } finally {
+      setScoring(false);
+    }
+  }
+
+  function pickTicker(t: string) {
+    const up = toUpperTicker(t);
+    if (!up) return;
+    setTicker(up);
+  }
 
   return (
-    <View style={styles.screen}>
-      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        <Text style={styles.title}>Accuracy Report Card</Text>
-        <Text style={styles.subtitle}>
-          Scores past predictions after the horizon passes. More samples = more reliable.
-        </Text>
+    <View style={styles.container}>
+      <Text style={styles.title}>Accuracy</Text>
+      <Text style={styles.sub}>
+        This scores past predictions after they “mature” (once enough trading days pass).
+      </Text>
 
+      <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.card}>
+          <Text style={styles.label}>Quick tickers</Text>
+          <View style={styles.chips}>
+            {(savedTickers.length ? savedTickers.slice(0, 12) : ["SPY", "QQQ", "TSLA"]).map((t) => (
+              <Pressable key={t} onPress={() => pickTicker(t)} style={styles.chip}>
+                <Text style={styles.chipText}>{t}</Text>
+              </Pressable>
+            ))}
+          </View>
+
           <Text style={styles.label}>Ticker</Text>
           <TextInput
             value={ticker}
-            onChangeText={(t) => setTicker(t.toUpperCase())}
+            onChangeText={(v) => setTicker(toUpperTicker(v))}
             placeholder="SPY"
-            placeholderTextColor="#6b7280"
             autoCapitalize="characters"
             autoCorrect={false}
             style={styles.input}
           />
 
           <View style={styles.row}>
-            <Pressable
-              onPress={() => {
-                const next = horizonDays === 5 ? 10 : horizonDays === 10 ? 20 : 5;
-                setHorizonDays(next);
-              }}
-              style={styles.smallButton}
-            >
-              <Text style={styles.smallButtonText}>Horizon: {horizonDays}d</Text>
+            <View style={styles.rowItem}>
+              <Text style={styles.label}>Horizon days</Text>
+              <TextInput
+                value={horizon}
+                onChangeText={setHorizon}
+                placeholder="5"
+                keyboardType="number-pad"
+                style={styles.input}
+              />
+            </View>
+
+            <View style={styles.rowItem}>
+              <Text style={styles.label}>Limit</Text>
+              <TextInput
+                value={limit}
+                onChangeText={setLimit}
+                placeholder="200"
+                keyboardType="number-pad"
+                style={styles.input}
+              />
+            </View>
+          </View>
+
+          <View style={styles.actions}>
+            <Pressable style={styles.button} onPress={fetchReportAndScoreboard} disabled={loading}>
+              <Text style={styles.buttonText}>{loading ? "Loading..." : "Refresh Accuracy"}</Text>
             </Pressable>
 
-            <Pressable onPress={() => fetchMetrics()} style={styles.button}>
-              <Text style={styles.buttonText}>{loadingMetrics ? "Loading..." : "Load metrics"}</Text>
-            </Pressable>
-
-            <Pressable onPress={scoreNow} style={[styles.smallButton, styles.scoreButton]}>
-              <Text style={styles.smallButtonText}>{loadingScore ? "Scoring..." : "Score now"}</Text>
+            <Pressable style={styles.buttonOutline} onPress={runScoring} disabled={scoring}>
+              <Text style={styles.buttonOutlineText}>{scoring ? "Scoring..." : "Score Predictions"}</Text>
             </Pressable>
           </View>
 
           <Text style={styles.hint}>
-            Beginner note: “Hit rate” = how often UP/DOWN was correct after{" "}
-            <Text style={styles.bold}>{horizonDays} trading days</Text>.
+            Tip: Run “Score Predictions” once per day. Then “Refresh Accuracy” to see updated results.
           </Text>
-
-          {cooldownLeftSec > 0 ? (
-            <Text style={styles.mutedSmall}>
-              Score cooldown: ~{Math.ceil(cooldownLeftSec / 60)} min remaining
-            </Text>
-          ) : null}
-
-          <View style={styles.chipsWrap}>
-            {quickTickers.map((t) => (
-              <Pressable
-                key={t}
-                onPress={() => {
-                  setTicker(t);
-                  fetchMetrics(t, horizonDays);
-                }}
-                style={styles.chip}
-              >
-                <Text style={styles.chipText}>{t}</Text>
-              </Pressable>
-            ))}
-          </View>
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Metrics</Text>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Report Card</Text>
+          {loading ? <ActivityIndicator /> : null}
+        </View>
 
-          {loadingMetrics ? (
-            <View style={styles.loadingRow}>
-              <ActivityIndicator />
-              <Text style={styles.loadingText}>Fetching…</Text>
-            </View>
-          ) : metricsErr ? (
-            <Text style={styles.errorText}>Error: {metricsErr}</Text>
-          ) : !metrics ? (
-            <Text style={styles.muted}>Tap “Load metrics”.</Text>
-          ) : metrics.note && !metrics.hit_rate ? (
-            <Text style={styles.muted}>{metrics.note}</Text>
-          ) : (
-            <>
-              <View style={styles.kpiRow}>
-                <View style={styles.kpiBox}>
-                  <Text style={styles.kpiLabel}>Hit rate</Text>
-                  <Text style={styles.kpiValue}>{fmtPct(metrics.hit_rate, 1)}</Text>
-                </View>
-                <View style={styles.kpiBox}>
-                  <Text style={styles.kpiLabel}>Avg realized</Text>
-                  <Text style={styles.kpiValue}>
-                    {metrics.avg_realized_return == null ? "-" : fmtPct(metrics.avg_realized_return, 2)}
-                  </Text>
-                </View>
-                <View style={styles.kpiBox}>
-                  <Text style={styles.kpiLabel}>Samples</Text>
-                  <Text style={styles.kpiValue}>{String(metrics.count ?? "-")}</Text>
-                </View>
+        {!report ? (
+          <Text style={styles.muted}>Tap “Refresh Accuracy” to load stats.</Text>
+        ) : report.note && !report.samples ? (
+          <View style={styles.noteBox}>
+            <Text style={styles.noteTitle}>Not enough scored samples yet</Text>
+            <Text style={styles.noteText}>{report.note}</Text>
+          </View>
+        ) : (
+          <View style={styles.card}>
+            <Text style={styles.bigLine}>
+              {report.ticker} • {report.horizon_days}d
+            </Text>
+
+            <View style={styles.kpis}>
+              <View style={styles.kpi}>
+                <Text style={styles.kpiLabel}>Samples</Text>
+                <Text style={styles.kpiValue}>{report.samples ?? "—"}</Text>
               </View>
 
-              <Text style={styles.sectionSubtitle}>By confidence</Text>
+              <View style={styles.kpi}>
+                <Text style={styles.kpiLabel}>Hit rate</Text>
+                <Text style={styles.kpiValue}>{fmtPct(report.overall_hit_rate, 1)}</Text>
+              </View>
 
-              {Array.isArray(metrics.by_confidence) && metrics.by_confidence.length ? (
-                metrics.by_confidence.map((b, idx) => (
-                  <View key={idx} style={styles.calRow}>
-                    <Text style={styles.calLeft}>{b.label}</Text>
-                    <Text style={styles.calMid}>n={b.count}</Text>
-                    <Text style={styles.calRight}>{b.hit_rate == null ? "-" : fmtPct(b.hit_rate, 0)}</Text>
-                  </View>
-                ))
-              ) : Array.isArray(metrics.calibration) && metrics.calibration.length ? (
-                metrics.calibration.map((b, idx) => (
-                  <View key={idx} style={styles.calRow}>
-                    <Text style={styles.calLeft}>
-                      {fmtPct(b.lo, 0)}–{fmtPct(Math.min(1, b.hi), 0)}
-                    </Text>
-                    <Text style={styles.calMid}>n={b.count}</Text>
-                    <Text style={styles.calRight}>{b.up_rate == null ? "-" : fmtPct(b.up_rate, 0)}</Text>
-                  </View>
-                ))
-              ) : (
-                <Text style={styles.muted}>No buckets yet.</Text>
-              )}
+              <View style={styles.kpi}>
+                <Text style={styles.kpiLabel}>Avg realized</Text>
+                <Text style={styles.kpiValue}>{fmtPct(report.avg_realized_return, 2)}</Text>
+              </View>
+            </View>
 
-              {metrics.note ? <Text style={styles.hint}>{metrics.note}</Text> : null}
-            </>
-          )}
+            {report.high_confidence ? (
+              <View style={styles.subCard}>
+                <Text style={styles.subCardTitle}>HIGH Confidence Bucket</Text>
+                <Text style={styles.subCardText}>
+                  count: {report.high_confidence.count} • hit rate: {fmtPct(report.high_confidence.hit_rate, 1)}
+                </Text>
+              </View>
+            ) : null}
+
+            {(report.by_confidence || []).length ? (
+              <View style={styles.subCard}>
+                <Text style={styles.subCardTitle}>By confidence</Text>
+                {(report.by_confidence || []).map((b) => (
+                  <Text key={b.label} style={styles.subCardText}>
+                    {b.label}: count {b.count} • hit {fmtPct(b.hit_rate, 1)}
+                  </Text>
+                ))}
+              </View>
+            ) : null}
+
+            <Text style={styles.hint}>
+              “Hit rate” = how often UP/DOWN matched reality (after the horizon passed).
+            </Text>
+          </View>
+        )}
+
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Recent Scored Predictions</Text>
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Last score run</Text>
-          {!scoreResp ? (
-            <Text style={styles.muted}>Tap “Score now” to update scored outcomes.</Text>
-          ) : (
-            <>
-              <Text style={styles.meta}>ok: {String(scoreResp.ok)}</Text>
-              <Text style={styles.meta}>fetched: {String(scoreResp.fetched ?? "-")}</Text>
-              <Text style={styles.meta}>
-                counts: <Text style={styles.monoSmall}>{JSON.stringify(scoreResp.counts || {}, null, 0)}</Text>
-              </Text>
-              {scoreResp.note ? <Text style={styles.hint}>{scoreResp.note}</Text> : null}
-            </>
-          )}
-        </View>
+        {rows.length === 0 ? (
+          <Text style={styles.muted}>No scored rows yet. Run “Score Predictions” after time passes.</Text>
+        ) : (
+          rows.slice(0, 50).map((r) => {
+            const ok = (r.direction || "").toUpperCase() === (r.realized_direction || "").toUpperCase();
+            return (
+              <View key={r.id} style={styles.item}>
+                <View style={styles.itemTop}>
+                  <Text style={styles.itemTicker}>{r.ticker}</Text>
+                  <Text style={[styles.badge, ok ? styles.badgeOk : styles.badgeBad]}>
+                    {ok ? "HIT" : "MISS"}
+                  </Text>
+                </View>
 
-        <Text style={styles.footerNote}>
-          Reminder: Even strong models won’t be 100%. You’re building transparency + measurable edge.
-        </Text>
+                <Text style={styles.itemMeta}>
+                  pred: {(r.direction || "—").toString()} • prob_up {fmtProb(r.prob_up)} • exp {fmtPct(r.exp_return)}
+                </Text>
+                <Text style={styles.itemMeta}>
+                  realized: {(r.realized_direction || "—").toString()} • return {fmtPct(r.realized_return, 2)}
+                </Text>
+                <Text style={styles.itemSmall}>
+                  as_of {String(r.as_of_date || "—")} • scored {String(r.scored_at || "—")}
+                </Text>
+              </View>
+            );
+          })
+        )}
       </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#0B1220" },
-  container: { padding: 16, paddingBottom: 40 },
-  title: { color: "#FFFFFF", fontSize: 22, fontWeight: "900" },
-  subtitle: { color: "#A7B0C0", marginTop: 6, marginBottom: 12, lineHeight: 18 },
-  bold: { color: "#E5E7EB", fontWeight: "900" },
+  container: { flex: 1, padding: 16, gap: 10 },
+  title: { fontSize: 28, fontWeight: "800" },
+  sub: { color: "#666" },
+
+  scroll: { paddingBottom: 40, gap: 12 },
 
   card: {
-    backgroundColor: "#111A2E",
-    borderColor: "#223256",
     borderWidth: 1,
-    borderRadius: 16,
-    padding: 14,
-    marginTop: 12,
+    borderColor: "#ddd",
+    borderRadius: 12,
+    padding: 12,
+    gap: 10,
+    backgroundColor: "white",
   },
 
-  label: { color: "#E5E7EB", fontWeight: "800", marginBottom: 6 },
+  label: { fontSize: 12, color: "#666", marginBottom: 6 },
+
   input: {
-    backgroundColor: "#0B1220",
-    borderColor: "#223256",
     borderWidth: 1,
-    borderRadius: 12,
+    borderColor: "#ddd",
+    borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    color: "#FFFFFF",
     fontSize: 16,
+    backgroundColor: "white",
   },
 
-  row: { flexDirection: "row", gap: 10, marginTop: 12, alignItems: "center", flexWrap: "wrap" },
+  row: { flexDirection: "row", gap: 10 },
+  rowItem: { flex: 1 },
 
-  button: { backgroundColor: "#2E6BFF", paddingHorizontal: 16, paddingVertical: 12, borderRadius: 12 },
-  buttonText: { color: "#FFFFFF", fontWeight: "900" },
-
-  smallButton: {
-    backgroundColor: "#1B2A4A",
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#223256",
-  },
-  scoreButton: { borderColor: "#2E6BFF" },
-  smallButtonText: { color: "#E5E7EB", fontWeight: "800" },
-
-  hint: { color: "#A7B0C0", marginTop: 10, lineHeight: 18 },
-  mutedSmall: { color: "#A7B0C0", fontSize: 12, marginTop: 8 },
-  chipsWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
+  chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   chip: {
-    backgroundColor: "#0B1220",
-    borderColor: "#223256",
     borderWidth: 1,
+    borderColor: "#ddd",
     paddingHorizontal: 10,
     paddingVertical: 8,
     borderRadius: 999,
+    backgroundColor: "white",
   },
-  chipText: { color: "#E5E7EB", fontWeight: "900" },
+  chipText: { fontWeight: "900", color: "#111", fontSize: 12 },
 
-  sectionTitle: { color: "#FFFFFF", fontWeight: "900", fontSize: 16, marginBottom: 6 },
-  sectionSubtitle: { color: "#E5E7EB", marginTop: 12, marginBottom: 6, fontWeight: "900" },
-
-  loadingRow: { marginTop: 10, flexDirection: "row", gap: 10, alignItems: "center" },
-  loadingText: { color: "#A7B0C0" },
-
-  muted: { color: "#A7B0C0" },
-  errorText: { color: "#FF6B6B", marginTop: 8, fontWeight: "800" },
-
-  kpiRow: { flexDirection: "row", gap: 10, marginTop: 10, flexWrap: "wrap" },
-  kpiBox: {
-    backgroundColor: "#0B1220",
-    borderColor: "#223256",
+  actions: { flexDirection: "row", gap: 10, marginTop: 4 },
+  button: {
+    flex: 1,
+    backgroundColor: "#111",
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: "center",
+  },
+  buttonText: { color: "white", fontSize: 16, fontWeight: "700" },
+  buttonOutline: {
     borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-    minWidth: 110,
+    borderColor: "#111",
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: "center",
+    paddingHorizontal: 12,
   },
-  kpiLabel: { color: "#A7B0C0", fontWeight: "800" },
-  kpiValue: { color: "#FFFFFF", fontWeight: "900", fontSize: 18, marginTop: 4 },
+  buttonOutlineText: { fontWeight: "800", color: "#111" },
 
-  calRow: {
+  hint: { fontSize: 12, color: "#666" },
+
+  sectionHeader: {
     flexDirection: "row",
     alignItems: "center",
-    marginTop: 8,
-    backgroundColor: "#0B1220",
-    borderColor: "#223256",
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    justifyContent: "space-between",
+    marginTop: 6,
   },
-  calLeft: { color: "#E5E7EB", fontWeight: "900", width: 110 },
-  calMid: { color: "#A7B0C0", fontWeight: "800", marginLeft: 8 },
-  calRight: { color: "#FFFFFF", fontWeight: "900", marginLeft: "auto" },
+  sectionTitle: { fontSize: 18, fontWeight: "800" },
 
-  meta: { color: "#A7B0C0", marginTop: 6 },
-  monoSmall: { color: "#E5E7EB", fontFamily: "monospace", fontSize: 12 },
+  muted: { color: "#666" },
 
-  footerNote: { marginTop: 14, color: "#93A4C7", fontSize: 12, lineHeight: 16 },
+  noteBox: {
+    borderWidth: 1,
+    borderColor: "#ffe2b8",
+    backgroundColor: "#fff6e8",
+    borderRadius: 12,
+    padding: 12,
+    gap: 6,
+  },
+  noteTitle: { fontWeight: "900", color: "#7a4a00" },
+  noteText: { color: "#7a4a00" },
+
+  bigLine: { fontSize: 16, fontWeight: "900" },
+
+  kpis: { flexDirection: "row", gap: 10 },
+  kpi: { flex: 1, borderWidth: 1, borderColor: "#eee", borderRadius: 10, padding: 10 },
+  kpiLabel: { fontSize: 12, color: "#666" },
+  kpiValue: { fontSize: 16, fontWeight: "900", marginTop: 2 },
+
+  subCard: { borderWidth: 1, borderColor: "#eee", borderRadius: 10, padding: 10, gap: 4 },
+  subCardTitle: { fontWeight: "900" },
+  subCardText: { color: "#444", fontSize: 12 },
+
+  item: {
+    borderWidth: 1,
+    borderColor: "#eee",
+    borderRadius: 12,
+    padding: 12,
+    gap: 6,
+    backgroundColor: "white",
+  },
+  itemTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  itemTicker: { fontSize: 16, fontWeight: "900" },
+
+  badge: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  badgeOk: { backgroundColor: "#eaffea", color: "#0a6b0a", borderWidth: 1, borderColor: "#b8f0b8" },
+  badgeBad: { backgroundColor: "#fff0f0", color: "#a40000", borderWidth: 1, borderColor: "#ffcccc" },
+
+  itemMeta: { color: "#666", fontSize: 12 },
+  itemSmall: { color: "#888", fontSize: 11 },
 });
