@@ -4,6 +4,7 @@ import {
   Alert,
   Linking,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -11,25 +12,24 @@ import {
   View,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useLocalSearchParams } from "expo-router";
 
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
 const STORAGE_KEYS = {
-  // We'll read from any of these, but we will WRITE to the best one we find.
   savedTickersCandidates: [
     "wmr:savedTickers:v3",
     "wmr:savedTickers:v2",
     "wmr:savedTickers:v1",
     "savedTickers",
   ],
-  // Fallback write target if none exist yet:
   savedTickersDefaultWrite: "wmr:savedTickers:v3",
 
   lastNewsTicker: "wmr:lastNewsTicker:v3",
   lastNewsLimit: "wmr:lastNewsLimit:v3",
   lastNewsHoursBack: "wmr:lastNewsHoursBack:v3",
-  newsLanguage: "wmr:newsLanguage:v3", // "ALL" or e.g. "English"
-  newsCountry: "wmr:newsCountry:v3", // "ALL" or e.g. "United States"
+  newsLanguage: "wmr:newsLanguage:v3",
+  newsCountry: "wmr:newsCountry:v3",
 };
 
 type NewsItem = {
@@ -85,9 +85,7 @@ function uniq(arr: string[]) {
 function formatSeenDate(seendate?: string) {
   if (!seendate) return "";
   const s = String(seendate);
-  if (s.length >= 15 && s.includes("T") && s.endsWith("Z")) {
-    return s.replace("Z", " UTC");
-  }
+  if (s.length >= 15 && s.includes("T") && s.endsWith("Z")) return s.replace("Z", " UTC");
   return s;
 }
 
@@ -109,34 +107,26 @@ function looksEnglish(lang?: string) {
 }
 
 function normCountry(s?: string) {
-  const v = (s || "").trim();
-  if (!v) return "";
-  // Keep original (GDELT uses full names often)
-  return v;
+  return (s || "").trim();
 }
 
 async function findSavedTickersKey(): Promise<string> {
-  // Prefer an existing key so we don't fork storage
   for (const key of STORAGE_KEYS.savedTickersCandidates) {
     try {
       const raw = await AsyncStorage.getItem(key);
       if (raw && raw.trim().length > 0) return key;
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
   return STORAGE_KEYS.savedTickersDefaultWrite;
 }
 
 async function loadSavedTickers(): Promise<{ key: string; tickers: string[] }> {
   const key = await findSavedTickersKey();
+
   try {
     const raw = await AsyncStorage.getItem(key);
     if (!raw) {
-      return {
-        key,
-        tickers: ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"],
-      };
+      return { key, tickers: ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"] };
     }
 
     let vals: any = null;
@@ -157,12 +147,13 @@ async function loadSavedTickers(): Promise<{ key: string; tickers: string[] }> {
     }
 
     if (typeof vals === "string") {
-      const parts = vals
-        .replace(/\s+/g, ",")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const cleaned = uniq(parts);
+      const cleaned = uniq(
+        vals
+          .replace(/\s+/g, ",")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      );
       return {
         key,
         tickers: cleaned.length
@@ -170,28 +161,25 @@ async function loadSavedTickers(): Promise<{ key: string; tickers: string[] }> {
           : ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"],
       };
     }
-  } catch {
-    // ignore
-  }
+  } catch {}
 
-  return {
-    key,
-    tickers: ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"],
-  };
+  return { key, tickers: ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"] };
 }
 
 async function saveTickersToKey(key: string, tickers: string[]) {
-  const cleaned = uniq(tickers);
-  await AsyncStorage.setItem(key, JSON.stringify(cleaned));
+  await AsyncStorage.setItem(key, JSON.stringify(uniq(tickers)));
 }
 
 export default function NewsTab() {
+  const params = useLocalSearchParams();
+  const routeTicker = typeof params.ticker === "string" ? params.ticker : "";
+
   const [ticker, setTicker] = useState<string>("TSLA");
   const [limit, setLimit] = useState<string>("10");
   const [hoursBack, setHoursBack] = useState<string>("72");
 
-  const [selectedLanguage, setSelectedLanguage] = useState<string>("ALL"); // "ALL" or "English"
-  const [selectedCountry, setSelectedCountry] = useState<string>("ALL"); // "ALL" or "United States"
+  const [selectedLanguage, setSelectedLanguage] = useState<string>("ALL");
+  const [selectedCountry, setSelectedCountry] = useState<string>("ALL");
 
   const [savedTickers, setSavedTickers] = useState<string[]>([]);
   const [savedTickersKey, setSavedTickersKey] = useState<string>(
@@ -200,6 +188,7 @@ export default function NewsTab() {
   const [editTickers, setEditTickers] = useState(false);
 
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [resp, setResp] = useState<NewsResponse | null>(null);
 
   const lastFetchId = useRef(0);
@@ -220,15 +209,12 @@ export default function NewsTab() {
 
   const availableLanguages = useMemo(() => {
     if (!resp || !resp.ok) return ["ALL"];
-    const langs = new Set<string>();
-    langs.add("ALL");
-
+    const langs = new Set<string>(["ALL"]);
     for (const it of resp.items || []) {
       const l = normLang(it.language);
       if (l) langs.add(l);
       if (looksEnglish(it.language)) langs.add("English");
     }
-
     return Array.from(langs).sort((a, b) => {
       if (a === "ALL") return -1;
       if (b === "ALL") return 1;
@@ -238,14 +224,11 @@ export default function NewsTab() {
 
   const availableCountries = useMemo(() => {
     if (!resp || !resp.ok) return ["ALL"];
-    const cs = new Set<string>();
-    cs.add("ALL");
-
+    const cs = new Set<string>(["ALL"]);
     for (const it of resp.items || []) {
       const c = normCountry(it.sourcecountry);
       if (c) cs.add(c);
     }
-
     return Array.from(cs).sort((a, b) => {
       if (a === "ALL") return -1;
       if (b === "ALL") return 1;
@@ -257,18 +240,14 @@ export default function NewsTab() {
     if (!resp || !resp.ok) return [];
     let items = resp.items || [];
 
-    // Country filter
     if (selectedCountry !== "ALL") {
       items = items.filter((it) => normCountry(it.sourcecountry) === selectedCountry);
     }
 
-    // Language filter
     if (selectedLanguage === "ALL") return items;
-
     if (selectedLanguage === "English") {
       return items.filter((it) => looksEnglish(it.language) || normLang(it.language) === "English");
     }
-
     return items.filter((it) => normLang(it.language) === selectedLanguage);
   }, [resp, selectedLanguage, selectedCountry]);
 
@@ -287,9 +266,7 @@ export default function NewsTab() {
       if (hb) setHoursBack(String(hb));
       if (lang) setSelectedLanguage(lang);
       if (country) setSelectedCountry(country);
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   async function savePrefs(t: string, lim: number, hb: number, lang: string, country: string) {
@@ -301,20 +278,19 @@ export default function NewsTab() {
         AsyncStorage.setItem(STORAGE_KEYS.newsLanguage, lang),
         AsyncStorage.setItem(STORAGE_KEYS.newsCountry, country),
       ]);
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
-  async function runFetch(forcedTicker?: string) {
+  async function runFetch(forcedTicker?: string, asRefresh?: boolean) {
     const fetchId = ++lastFetchId.current;
 
     const { lim, hb } = parsed;
     const t = toUpperTicker(forcedTicker ?? parsed.t) || "TSLA";
 
-    setLoading(true);
-    setResp(null);
+    if (asRefresh) setRefreshing(true);
+    else setLoading(true);
 
+    setResp(null);
     await savePrefs(t, lim, hb, selectedLanguage, selectedCountry);
 
     const url = `${API_BASE}/api/news?ticker=${encodeURIComponent(
@@ -336,9 +312,7 @@ export default function NewsTab() {
         );
       }
 
-      // Ignore late responses
       if (fetchId !== lastFetchId.current) return;
-
       setResp(json as NewsResponse);
     } catch (e: any) {
       if (fetchId !== lastFetchId.current) return;
@@ -350,12 +324,14 @@ export default function NewsTab() {
         note: "Mobile fetch failed.",
       });
     } finally {
-      if (fetchId === lastFetchId.current) setLoading(false);
+      if (fetchId === lastFetchId.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }
 
   useEffect(() => {
-    // Load saved tickers (chips)
     loadSavedTickers()
       .then(({ key, tickers }) => {
         setSavedTickersKey(key);
@@ -366,16 +342,28 @@ export default function NewsTab() {
         setSavedTickers(["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"]);
       });
 
-    // Load prefs then auto-fetch
     loadPrefs().finally(() => {
+      // If we got a ticker from Watchlist route, prefer it.
+      const tk = toUpperTicker(routeTicker);
+      if (tk) setTicker(tk);
+
       setTimeout(() => {
-        runFetch();
+        runFetch(tk || undefined);
       }, 50);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // If selected filters no longer exist for the current response, fall back safely.
+  // When navigating from Watchlist -> News with a ticker param, update & fetch.
+  useEffect(() => {
+    const tk = toUpperTicker(routeTicker);
+    if (tk && tk !== parsed.t) {
+      setTicker(tk);
+      runFetch(tk);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeTicker]);
+
   useEffect(() => {
     if (!availableLanguages.includes(selectedLanguage)) setSelectedLanguage("ALL");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -390,10 +378,7 @@ export default function NewsTab() {
     if (!url) return;
     try {
       const ok = await Linking.canOpenURL(url);
-      if (!ok) {
-        Alert.alert("Can't open link", url);
-        return;
-      }
+      if (!ok) return Alert.alert("Can't open link", url);
       await Linking.openURL(url);
     } catch {
       Alert.alert("Can't open link", url);
@@ -436,7 +421,7 @@ export default function NewsTab() {
     const next = (savedTickers || []).filter((x) => toUpperTicker(x) !== up);
     try {
       await saveTickersToKey(savedTickersKey, next);
-      setSavedTickers(next.length ? next : savedTickers);
+      if (next.length) setSavedTickers(next);
     } catch {
       Alert.alert("Error", "Couldn't update tickers.");
     }
@@ -451,143 +436,142 @@ export default function NewsTab() {
     <View style={styles.container}>
       <Text style={styles.title}>News</Text>
 
-      <View style={styles.card}>
-        <View style={styles.rowBetween}>
-          <Text style={styles.label}>Quick tickers</Text>
+      <ScrollView
+        contentContainerStyle={styles.results}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={() => runFetch(undefined, true)} />
+        }
+      >
+        <View style={styles.card}>
+          <View style={styles.rowBetween}>
+            <Text style={styles.label}>Quick tickers</Text>
 
-          <View style={styles.rowRight}>
-            <Pressable
-              onPress={() => setEditTickers((v) => !v)}
-              style={[styles.smallBtn, editTickers && styles.smallBtnActive]}
-            >
-              <Text style={[styles.smallBtnText, editTickers && styles.smallBtnTextActive]}>
-                {editTickers ? "Done" : "Edit"}
-              </Text>
-            </Pressable>
+            <View style={styles.rowRight}>
+              <Pressable
+                onPress={() => setEditTickers((v) => !v)}
+                style={[styles.smallBtn, editTickers && styles.smallBtnActive]}
+              >
+                <Text style={[styles.smallBtnText, editTickers && styles.smallBtnTextActive]}>
+                  {editTickers ? "Done" : "Edit"}
+                </Text>
+              </Pressable>
 
-            <Pressable
-              onPress={addCurrentTickerToSaved}
-              style={[styles.smallBtn, isSaved && styles.smallBtnDisabled]}
-              disabled={isSaved}
-            >
-              <Text style={[styles.smallBtnText, isSaved && styles.smallBtnTextDisabled]}>
-                {isSaved ? "Saved" : "+ Save"}
-              </Text>
-            </Pressable>
+              <Pressable
+                onPress={addCurrentTickerToSaved}
+                style={[styles.smallBtn, isSaved && styles.smallBtnDisabled]}
+                disabled={isSaved}
+              >
+                <Text style={[styles.smallBtnText, isSaved && styles.smallBtnTextDisabled]}>
+                  {isSaved ? "Saved" : "+ Save"}
+                </Text>
+              </Pressable>
+            </View>
           </View>
-        </View>
 
-        <View style={styles.tickerWrap}>
-          {(savedTickers.length ? savedTickers : ["SPY", "QQQ", "TSLA", "NVDA"]).map((t) => {
-            const active = toUpperTicker(t) === parsed.t;
-            return (
-              <View key={t} style={styles.tickerChipRow}>
-                <Pressable
-                  onPress={() => tapTickerChip(t)}
-                  style={[styles.tickerChip, active && styles.tickerChipActive]}
-                >
-                  <Text style={[styles.tickerText, active && styles.tickerTextActive]}>{t}</Text>
-                </Pressable>
-
-                {editTickers ? (
+          <View style={styles.tickerWrap}>
+            {(savedTickers.length ? savedTickers : ["SPY", "QQQ", "TSLA", "NVDA"]).map((t) => {
+              const active = toUpperTicker(t) === parsed.t;
+              return (
+                <View key={t} style={styles.tickerChipRow}>
                   <Pressable
-                    onPress={() => removeSavedTicker(t)}
-                    style={styles.removeChip}
-                    accessibilityLabel={`Remove ${t}`}
+                    onPress={() => tapTickerChip(t)}
+                    style={[styles.tickerChip, active && styles.tickerChipActive]}
                   >
-                    <Text style={styles.removeChipText}>✕</Text>
+                    <Text style={[styles.tickerText, active && styles.tickerTextActive]}>{t}</Text>
                   </Pressable>
-                ) : null}
-              </View>
-            );
-          })}
-        </View>
 
-        <Text style={styles.label}>Ticker</Text>
-        <TextInput
-          value={ticker}
-          onChangeText={(v) => setTicker(toUpperTicker(v))}
-          placeholder="TSLA"
-          autoCapitalize="characters"
-          autoCorrect={false}
-          style={styles.input}
-        />
-
-        <View style={styles.row}>
-          <View style={styles.rowItem}>
-            <Text style={styles.label}>Limit</Text>
-            <TextInput
-              value={limit}
-              onChangeText={setLimit}
-              placeholder="10"
-              keyboardType="number-pad"
-              style={styles.input}
-            />
+                  {editTickers ? (
+                    <Pressable onPress={() => removeSavedTicker(t)} style={styles.removeChip}>
+                      <Text style={styles.removeChipText}>✕</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              );
+            })}
           </View>
 
-          <View style={styles.rowItem}>
-            <Text style={styles.label}>Hours back</Text>
-            <TextInput
-              value={hoursBack}
-              onChangeText={setHoursBack}
-              placeholder="72"
-              keyboardType="number-pad"
-              style={styles.input}
-            />
+          <Text style={styles.label}>Ticker</Text>
+          <TextInput
+            value={ticker}
+            onChangeText={(v) => setTicker(toUpperTicker(v))}
+            placeholder="TSLA"
+            autoCapitalize="characters"
+            autoCorrect={false}
+            style={styles.input}
+          />
+
+          <View style={styles.row}>
+            <View style={styles.rowItem}>
+              <Text style={styles.label}>Limit</Text>
+              <TextInput
+                value={limit}
+                onChangeText={setLimit}
+                placeholder="10"
+                keyboardType="number-pad"
+                style={styles.input}
+              />
+            </View>
+
+            <View style={styles.rowItem}>
+              <Text style={styles.label}>Hours back</Text>
+              <TextInput
+                value={hoursBack}
+                onChangeText={setHoursBack}
+                placeholder="72"
+                keyboardType="number-pad"
+                style={styles.input}
+              />
+            </View>
           </View>
+
+          <Text style={styles.label}>Language</Text>
+          <View style={styles.chipWrap}>
+            {availableLanguages.map((lang) => {
+              const active = lang === selectedLanguage;
+              return (
+                <Pressable
+                  key={lang}
+                  onPress={() => setLang(lang)}
+                  style={[styles.chip, active && styles.chipActive]}
+                >
+                  <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                    {lang === "ALL" ? "All" : lang}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <Text style={styles.label}>Country</Text>
+          <View style={styles.chipWrap}>
+            {availableCountries.map((c) => {
+              const active = c === selectedCountry;
+              return (
+                <Pressable
+                  key={c}
+                  onPress={() => setCountry(c)}
+                  style={[styles.chip, active && styles.chipActive]}
+                >
+                  <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                    {c === "ALL" ? "All" : c}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <Pressable style={styles.button} onPress={() => runFetch()} disabled={loading}>
+            <Text style={styles.buttonText}>{loading ? "Loading..." : "Fetch News"}</Text>
+          </Pressable>
+
+          <Text style={styles.hint}>Pull down to refresh.</Text>
         </View>
 
-        <Text style={styles.label}>Language</Text>
-        <View style={styles.chipWrap}>
-          {availableLanguages.map((lang) => {
-            const active = lang === selectedLanguage;
-            return (
-              <Pressable
-                key={lang}
-                onPress={() => setLang(lang)}
-                style={[styles.chip, active && styles.chipActive]}
-              >
-                <Text style={[styles.chipText, active && styles.chipTextActive]}>
-                  {lang === "ALL" ? "All" : lang}
-                </Text>
-              </Pressable>
-            );
-          })}
+        <View style={styles.resultsHeader}>
+          <Text style={styles.resultsTitle}>Results</Text>
+          {loading ? <ActivityIndicator /> : null}
         </View>
 
-        <Text style={styles.label}>Country</Text>
-        <View style={styles.chipWrap}>
-          {availableCountries.map((c) => {
-            const active = c === selectedCountry;
-            return (
-              <Pressable
-                key={c}
-                onPress={() => setCountry(c)}
-                style={[styles.chip, active && styles.chipActive]}
-              >
-                <Text style={[styles.chipText, active && styles.chipTextActive]}>
-                  {c === "ALL" ? "All" : c}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
-
-        <Pressable style={styles.button} onPress={() => runFetch()} disabled={loading}>
-          <Text style={styles.buttonText}>{loading ? "Loading..." : "Fetch News"}</Text>
-        </Pressable>
-
-        <Text style={styles.hint}>
-          Tap a ticker chip to fetch instantly. Use Edit to remove tickers. Filters are client-side.
-        </Text>
-      </View>
-
-      <View style={styles.resultsHeader}>
-        <Text style={styles.resultsTitle}>Results</Text>
-        {loading ? <ActivityIndicator /> : null}
-      </View>
-
-      <ScrollView contentContainerStyle={styles.results}>
         {!resp ? (
           <Text style={styles.muted}>No data yet.</Text>
         ) : resp.ok ? (
@@ -606,11 +590,7 @@ export default function NewsTab() {
               </Text>
 
               {filteredItems.map((it, idx) => (
-                <Pressable
-                  key={`${it.url}-${idx}`}
-                  style={styles.item}
-                  onPress={() => openUrl(it.url)}
-                >
+                <Pressable key={`${it.url}-${idx}`} style={styles.item} onPress={() => openUrl(it.url)}>
                   <Text style={styles.itemTitle} numberOfLines={3}>
                     {it.title}
                   </Text>
@@ -648,7 +628,7 @@ export default function NewsTab() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16, gap: 12 },
+  container: { flex: 1, padding: 16, gap: 10 },
   title: { fontSize: 28, fontWeight: "800" },
 
   card: {
@@ -657,6 +637,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 12,
     gap: 10,
+    backgroundColor: "white",
   },
 
   rowBetween: {
@@ -746,6 +727,8 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    marginTop: 10,
+    marginBottom: 6,
   },
   resultsTitle: { fontSize: 18, fontWeight: "800" },
 
