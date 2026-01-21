@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -15,17 +15,21 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
 const STORAGE_KEYS = {
-  // Try multiple keys because your project evolved over time
+  // We'll read from any of these, but we will WRITE to the best one we find.
   savedTickersCandidates: [
     "wmr:savedTickers:v3",
     "wmr:savedTickers:v2",
     "wmr:savedTickers:v1",
     "savedTickers",
   ],
+  // Fallback write target if none exist yet:
+  savedTickersDefaultWrite: "wmr:savedTickers:v3",
+
   lastNewsTicker: "wmr:lastNewsTicker:v3",
   lastNewsLimit: "wmr:lastNewsLimit:v3",
   lastNewsHoursBack: "wmr:lastNewsHoursBack:v3",
   newsLanguage: "wmr:newsLanguage:v3", // "ALL" or e.g. "English"
+  newsCountry: "wmr:newsCountry:v3", // "ALL" or e.g. "United States"
 };
 
 type NewsItem = {
@@ -104,53 +108,101 @@ function looksEnglish(lang?: string) {
   return l === "english" || l === "en" || l.startsWith("en ");
 }
 
-async function loadSavedTickers(): Promise<string[]> {
+function normCountry(s?: string) {
+  const v = (s || "").trim();
+  if (!v) return "";
+  // Keep original (GDELT uses full names often)
+  return v;
+}
+
+async function findSavedTickersKey(): Promise<string> {
+  // Prefer an existing key so we don't fork storage
   for (const key of STORAGE_KEYS.savedTickersCandidates) {
     try {
       const raw = await AsyncStorage.getItem(key);
-      if (!raw) continue;
-
-      // Accept JSON array ["SPY","QQQ"] or comma string "SPY,QQQ"
-      let vals: any = null;
-
-      try {
-        vals = JSON.parse(raw);
-      } catch {
-        vals = raw;
-      }
-
-      if (Array.isArray(vals)) {
-        const cleaned = uniq(vals.map(String));
-        if (cleaned.length) return cleaned;
-      }
-
-      if (typeof vals === "string") {
-        const parts = vals
-          .replace(/\s+/g, ",")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        const cleaned = uniq(parts);
-        if (cleaned.length) return cleaned;
-      }
+      if (raw && raw.trim().length > 0) return key;
     } catch {
-      // ignore and keep trying keys
+      // ignore
     }
   }
+  return STORAGE_KEYS.savedTickersDefaultWrite;
+}
 
-  // Fallback defaults if no saved tickers found
-  return ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"];
+async function loadSavedTickers(): Promise<{ key: string; tickers: string[] }> {
+  const key = await findSavedTickersKey();
+  try {
+    const raw = await AsyncStorage.getItem(key);
+    if (!raw) {
+      return {
+        key,
+        tickers: ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"],
+      };
+    }
+
+    let vals: any = null;
+    try {
+      vals = JSON.parse(raw);
+    } catch {
+      vals = raw;
+    }
+
+    if (Array.isArray(vals)) {
+      const cleaned = uniq(vals.map(String));
+      return {
+        key,
+        tickers: cleaned.length
+          ? cleaned
+          : ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"],
+      };
+    }
+
+    if (typeof vals === "string") {
+      const parts = vals
+        .replace(/\s+/g, ",")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const cleaned = uniq(parts);
+      return {
+        key,
+        tickers: cleaned.length
+          ? cleaned
+          : ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"],
+      };
+    }
+  } catch {
+    // ignore
+  }
+
+  return {
+    key,
+    tickers: ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"],
+  };
+}
+
+async function saveTickersToKey(key: string, tickers: string[]) {
+  const cleaned = uniq(tickers);
+  await AsyncStorage.setItem(key, JSON.stringify(cleaned));
 }
 
 export default function NewsTab() {
   const [ticker, setTicker] = useState<string>("TSLA");
   const [limit, setLimit] = useState<string>("10");
   const [hoursBack, setHoursBack] = useState<string>("72");
-  const [selectedLanguage, setSelectedLanguage] = useState<string>("ALL"); // "ALL" or "English", etc.
+
+  const [selectedLanguage, setSelectedLanguage] = useState<string>("ALL"); // "ALL" or "English"
+  const [selectedCountry, setSelectedCountry] = useState<string>("ALL"); // "ALL" or "United States"
 
   const [savedTickers, setSavedTickers] = useState<string[]>([]);
+  const [savedTickersKey, setSavedTickersKey] = useState<string>(
+    STORAGE_KEYS.savedTickersDefaultWrite
+  );
+  const [editTickers, setEditTickers] = useState(false);
+
   const [loading, setLoading] = useState(false);
   const [resp, setResp] = useState<NewsResponse | null>(null);
+
+  const lastFetchId = useRef(0);
 
   const parsed = useMemo(() => {
     const t = toUpperTicker(ticker) || "TSLA";
@@ -184,10 +236,33 @@ export default function NewsTab() {
     });
   }, [resp]);
 
+  const availableCountries = useMemo(() => {
+    if (!resp || !resp.ok) return ["ALL"];
+    const cs = new Set<string>();
+    cs.add("ALL");
+
+    for (const it of resp.items || []) {
+      const c = normCountry(it.sourcecountry);
+      if (c) cs.add(c);
+    }
+
+    return Array.from(cs).sort((a, b) => {
+      if (a === "ALL") return -1;
+      if (b === "ALL") return 1;
+      return a.localeCompare(b);
+    });
+  }, [resp]);
+
   const filteredItems = useMemo(() => {
     if (!resp || !resp.ok) return [];
-    const items = resp.items || [];
+    let items = resp.items || [];
 
+    // Country filter
+    if (selectedCountry !== "ALL") {
+      items = items.filter((it) => normCountry(it.sourcecountry) === selectedCountry);
+    }
+
+    // Language filter
     if (selectedLanguage === "ALL") return items;
 
     if (selectedLanguage === "English") {
@@ -195,33 +270,36 @@ export default function NewsTab() {
     }
 
     return items.filter((it) => normLang(it.language) === selectedLanguage);
-  }, [resp, selectedLanguage]);
+  }, [resp, selectedLanguage, selectedCountry]);
 
-  async function loadSaved() {
+  async function loadPrefs() {
     try {
-      const [t, lim, hb, lang] = await Promise.all([
+      const [t, lim, hb, lang, country] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEYS.lastNewsTicker),
         AsyncStorage.getItem(STORAGE_KEYS.lastNewsLimit),
         AsyncStorage.getItem(STORAGE_KEYS.lastNewsHoursBack),
         AsyncStorage.getItem(STORAGE_KEYS.newsLanguage),
+        AsyncStorage.getItem(STORAGE_KEYS.newsCountry),
       ]);
 
       if (t) setTicker(toUpperTicker(t) || "TSLA");
       if (lim) setLimit(String(lim));
       if (hb) setHoursBack(String(hb));
       if (lang) setSelectedLanguage(lang);
+      if (country) setSelectedCountry(country);
     } catch {
       // ignore
     }
   }
 
-  async function savePrefs(t: string, lim: number, hb: number, lang: string) {
+  async function savePrefs(t: string, lim: number, hb: number, lang: string, country: string) {
     try {
       await Promise.all([
         AsyncStorage.setItem(STORAGE_KEYS.lastNewsTicker, t),
         AsyncStorage.setItem(STORAGE_KEYS.lastNewsLimit, String(lim)),
         AsyncStorage.setItem(STORAGE_KEYS.lastNewsHoursBack, String(hb)),
         AsyncStorage.setItem(STORAGE_KEYS.newsLanguage, lang),
+        AsyncStorage.setItem(STORAGE_KEYS.newsCountry, country),
       ]);
     } catch {
       // ignore
@@ -229,13 +307,15 @@ export default function NewsTab() {
   }
 
   async function runFetch(forcedTicker?: string) {
+    const fetchId = ++lastFetchId.current;
+
     const { lim, hb } = parsed;
     const t = toUpperTicker(forcedTicker ?? parsed.t) || "TSLA";
 
     setLoading(true);
     setResp(null);
 
-    await savePrefs(t, lim, hb, selectedLanguage);
+    await savePrefs(t, lim, hb, selectedLanguage, selectedCountry);
 
     const url = `${API_BASE}/api/news?ticker=${encodeURIComponent(
       t
@@ -250,14 +330,18 @@ export default function NewsTab() {
         json = JSON.parse(text);
       } catch {
         throw new Error(
-          `Non-JSON response from server (HTTP ${res.status}). First 120 chars: ${text
+          `Non-JSON response (HTTP ${res.status}). First 120 chars: ${text
             .slice(0, 120)
             .replace(/\s+/g, " ")}`
         );
       }
 
+      // Ignore late responses
+      if (fetchId !== lastFetchId.current) return;
+
       setResp(json as NewsResponse);
     } catch (e: any) {
+      if (fetchId !== lastFetchId.current) return;
       setResp({
         ok: false,
         provider: "gdelt",
@@ -266,16 +350,24 @@ export default function NewsTab() {
         note: "Mobile fetch failed.",
       });
     } finally {
-      setLoading(false);
+      if (fetchId === lastFetchId.current) setLoading(false);
     }
   }
 
   useEffect(() => {
-    // load saved tickers chips (from Home)
-    loadSavedTickers().then(setSavedTickers).catch(() => setSavedTickers([]));
+    // Load saved tickers (chips)
+    loadSavedTickers()
+      .then(({ key, tickers }) => {
+        setSavedTickersKey(key);
+        setSavedTickers(tickers);
+      })
+      .catch(() => {
+        setSavedTickersKey(STORAGE_KEYS.savedTickersDefaultWrite);
+        setSavedTickers(["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"]);
+      });
 
-    // load last prefs then auto-fetch
-    loadSaved().finally(() => {
+    // Load prefs then auto-fetch
+    loadPrefs().finally(() => {
       setTimeout(() => {
         runFetch();
       }, 50);
@@ -283,13 +375,16 @@ export default function NewsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // If saved language no longer exists for this ticker/time window, fall back to ALL.
+  // If selected filters no longer exist for the current response, fall back safely.
   useEffect(() => {
-    if (!availableLanguages.includes(selectedLanguage)) {
-      setSelectedLanguage("ALL");
-    }
+    if (!availableLanguages.includes(selectedLanguage)) setSelectedLanguage("ALL");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [availableLanguages.join("|")]);
+
+  useEffect(() => {
+    if (!availableCountries.includes(selectedCountry)) setSelectedCountry("ALL");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [availableCountries.join("|")]);
 
   async function openUrl(url?: string) {
     if (!url) return;
@@ -308,7 +403,13 @@ export default function NewsTab() {
   async function setLang(lang: string) {
     setSelectedLanguage(lang);
     const { t, lim, hb } = parsed;
-    await savePrefs(t, lim, hb, lang);
+    await savePrefs(t, lim, hb, lang, selectedCountry);
+  }
+
+  async function setCountry(country: string) {
+    setSelectedCountry(country);
+    const { t, lim, hb } = parsed;
+    await savePrefs(t, lim, hb, selectedLanguage, country);
   }
 
   async function tapTickerChip(t: string) {
@@ -318,23 +419,86 @@ export default function NewsTab() {
     await runFetch(up);
   }
 
+  async function addCurrentTickerToSaved() {
+    const t = parsed.t;
+    const next = uniq([t, ...(savedTickers || [])]);
+    try {
+      await saveTickersToKey(savedTickersKey, next);
+      setSavedTickers(next);
+      Alert.alert("Saved", `${t} added to your tickers.`);
+    } catch {
+      Alert.alert("Error", "Couldn't save tickers.");
+    }
+  }
+
+  async function removeSavedTicker(t: string) {
+    const up = toUpperTicker(t);
+    const next = (savedTickers || []).filter((x) => toUpperTicker(x) !== up);
+    try {
+      await saveTickersToKey(savedTickersKey, next);
+      setSavedTickers(next.length ? next : savedTickers);
+    } catch {
+      Alert.alert("Error", "Couldn't update tickers.");
+    }
+  }
+
+  const isSaved = useMemo(() => {
+    const t = parsed.t;
+    return (savedTickers || []).some((x) => toUpperTicker(x) === t);
+  }, [parsed.t, savedTickers]);
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>News</Text>
 
       <View style={styles.card}>
-        <Text style={styles.label}>Quick tickers</Text>
+        <View style={styles.rowBetween}>
+          <Text style={styles.label}>Quick tickers</Text>
+
+          <View style={styles.rowRight}>
+            <Pressable
+              onPress={() => setEditTickers((v) => !v)}
+              style={[styles.smallBtn, editTickers && styles.smallBtnActive]}
+            >
+              <Text style={[styles.smallBtnText, editTickers && styles.smallBtnTextActive]}>
+                {editTickers ? "Done" : "Edit"}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={addCurrentTickerToSaved}
+              style={[styles.smallBtn, isSaved && styles.smallBtnDisabled]}
+              disabled={isSaved}
+            >
+              <Text style={[styles.smallBtnText, isSaved && styles.smallBtnTextDisabled]}>
+                {isSaved ? "Saved" : "+ Save"}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+
         <View style={styles.tickerWrap}>
           {(savedTickers.length ? savedTickers : ["SPY", "QQQ", "TSLA", "NVDA"]).map((t) => {
             const active = toUpperTicker(t) === parsed.t;
             return (
-              <Pressable
-                key={t}
-                onPress={() => tapTickerChip(t)}
-                style={[styles.tickerChip, active && styles.tickerChipActive]}
-              >
-                <Text style={[styles.tickerText, active && styles.tickerTextActive]}>{t}</Text>
-              </Pressable>
+              <View key={t} style={styles.tickerChipRow}>
+                <Pressable
+                  onPress={() => tapTickerChip(t)}
+                  style={[styles.tickerChip, active && styles.tickerChipActive]}
+                >
+                  <Text style={[styles.tickerText, active && styles.tickerTextActive]}>{t}</Text>
+                </Pressable>
+
+                {editTickers ? (
+                  <Pressable
+                    onPress={() => removeSavedTicker(t)}
+                    style={styles.removeChip}
+                    accessibilityLabel={`Remove ${t}`}
+                  >
+                    <Text style={styles.removeChipText}>✕</Text>
+                  </Pressable>
+                ) : null}
+              </View>
             );
           })}
         </View>
@@ -374,17 +538,35 @@ export default function NewsTab() {
         </View>
 
         <Text style={styles.label}>Language</Text>
-        <View style={styles.langWrap}>
+        <View style={styles.chipWrap}>
           {availableLanguages.map((lang) => {
             const active = lang === selectedLanguage;
             return (
               <Pressable
                 key={lang}
                 onPress={() => setLang(lang)}
-                style={[styles.langChip, active && styles.langChipActive]}
+                style={[styles.chip, active && styles.chipActive]}
               >
-                <Text style={[styles.langText, active && styles.langTextActive]}>
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>
                   {lang === "ALL" ? "All" : lang}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        <Text style={styles.label}>Country</Text>
+        <View style={styles.chipWrap}>
+          {availableCountries.map((c) => {
+            const active = c === selectedCountry;
+            return (
+              <Pressable
+                key={c}
+                onPress={() => setCountry(c)}
+                style={[styles.chip, active && styles.chipActive]}
+              >
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                  {c === "ALL" ? "All" : c}
                 </Text>
               </Pressable>
             );
@@ -396,7 +578,7 @@ export default function NewsTab() {
         </Pressable>
 
         <Text style={styles.hint}>
-          Tip: tap a ticker chip to fetch instantly. Language filter is client-side.
+          Tap a ticker chip to fetch instantly. Use Edit to remove tickers. Filters are client-side.
         </Text>
       </View>
 
@@ -412,13 +594,15 @@ export default function NewsTab() {
           filteredItems.length === 0 ? (
             <Text style={styles.muted}>
               No headlines found for {resp.ticker}
-              {selectedLanguage !== "ALL" ? ` (${selectedLanguage})` : ""}.
+              {selectedLanguage !== "ALL" ? ` • ${selectedLanguage}` : ""}
+              {selectedCountry !== "ALL" ? ` • ${selectedCountry}` : ""}
             </Text>
           ) : (
             <>
               <Text style={styles.countLine}>
                 Showing {filteredItems.length} of {resp.items.length}
                 {selectedLanguage !== "ALL" ? ` • ${selectedLanguage}` : ""}
+                {selectedCountry !== "ALL" ? ` • ${selectedCountry}` : ""}
               </Text>
 
               {filteredItems.map((it, idx) => (
@@ -434,6 +618,7 @@ export default function NewsTab() {
                     {(it.domain || "unknown").toString()}
                     {it.seendate ? ` • ${formatSeenDate(it.seendate)}` : ""}
                     {it.language ? ` • ${normLang(it.language)}` : ""}
+                    {it.sourcecountry ? ` • ${normCountry(it.sourcecountry)}` : ""}
                   </Text>
                   <Text style={styles.itemUrl} numberOfLines={1}>
                     {it.url}
@@ -474,6 +659,14 @@ const styles = StyleSheet.create({
     gap: 10,
   },
 
+  rowBetween: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  rowRight: { flexDirection: "row", alignItems: "center", gap: 8 },
+
   label: { fontSize: 12, color: "#666", marginBottom: 6 },
   input: {
     borderWidth: 1,
@@ -488,7 +681,22 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", gap: 10 },
   rowItem: { flex: 1 },
 
+  smallBtn: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "white",
+  },
+  smallBtnActive: { borderColor: "#111", backgroundColor: "#111" },
+  smallBtnDisabled: { opacity: 0.5 },
+  smallBtnText: { fontWeight: "800", color: "#111", fontSize: 12 },
+  smallBtnTextActive: { color: "white" },
+  smallBtnTextDisabled: { color: "#111" },
+
   tickerWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  tickerChipRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   tickerChip: {
     borderWidth: 1,
     borderColor: "#ddd",
@@ -497,15 +705,21 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: "white",
   },
-  tickerChipActive: {
-    borderColor: "#111",
-    backgroundColor: "#111",
-  },
+  tickerChipActive: { borderColor: "#111", backgroundColor: "#111" },
   tickerText: { fontWeight: "800", color: "#111", fontSize: 12 },
   tickerTextActive: { color: "white" },
+  removeChip: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#111",
+  },
+  removeChipText: { color: "white", fontWeight: "900", fontSize: 12 },
 
-  langWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  langChip: {
+  chipWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  chip: {
     borderWidth: 1,
     borderColor: "#ddd",
     paddingHorizontal: 10,
@@ -513,12 +727,9 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: "white",
   },
-  langChipActive: {
-    borderColor: "#111",
-    backgroundColor: "#111",
-  },
-  langText: { fontWeight: "800", color: "#111", fontSize: 12 },
-  langTextActive: { color: "white" },
+  chipActive: { borderColor: "#111", backgroundColor: "#111" },
+  chipText: { fontWeight: "800", color: "#111", fontSize: 12 },
+  chipTextActive: { color: "white" },
 
   button: {
     marginTop: 4,
