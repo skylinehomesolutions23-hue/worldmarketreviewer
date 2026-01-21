@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 import httpx
+import os
 from fastapi import FastAPI
 from fastapi.responses import Response, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,6 +16,9 @@ from main_autobatch import TICKERS
 from data_loader import load_stock_data
 from feature_engineering import build_features
 from walk_forward import walk_forward_predict_proba
+
+from alerts_db import init_alerts_db
+from alerts_router import router as alerts_router
 
 from db import (
     init_db,
@@ -36,6 +40,7 @@ STATIC_DIR = BASE_DIR / "static"
 
 app = FastAPI(title="WorldMarketReviewer API")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.include_router(alerts_router)
 
 
 # -----------------------------
@@ -535,16 +540,15 @@ class SummaryRequest(BaseModel):
 # -----------------------------
 # startup
 # -----------------------------
-import os  # add this at the top of api.py if not already there
-
 @app.on_event("startup")
 def _startup():
-    # Local dev: if DATABASE_URL isn't set, skip DB init.
-    # Render: DATABASE_URL is set, so init_db runs normally.
     if not os.getenv("DATABASE_URL"):
-        print("[startup] DATABASE_URL not set; skipping init_db (local dev mode).")
+        print("[startup] DATABASE_URL not set; skipping init_db/init_alerts_db (local dev).")
         return
+
     init_db()
+    init_alerts_db()
+
 
 
 
