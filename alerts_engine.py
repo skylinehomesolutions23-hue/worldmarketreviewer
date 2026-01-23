@@ -1,68 +1,50 @@
-# alerts_engine.py
 import os
 import smtplib
 from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
-
-from alerts_db import (
-    get_subscription,
-    list_enabled_subscriptions,
-    insert_alert_events,
-    set_last_sent_at,
-)
-
-from db import get_latest_run_id, get_predictions_for_run
+from typing import Any, Dict, List, Optional
 
 
-# -----------------------------
-# config helpers
-# -----------------------------
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
 def smtp_configured() -> bool:
     """
-    Returns True if SMTP env vars are present.
-    If False, the alerts system will still "simulate" alerts (log events),
-    but it won't email anything.
+    Subscriber-email mode:
+      SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM_EMAIL must be set.
     """
     host = (os.getenv("SMTP_HOST") or "").strip()
+    port = (os.getenv("SMTP_PORT") or "").strip()
     user = (os.getenv("SMTP_USER") or "").strip()
     pwd = (os.getenv("SMTP_PASS") or "").strip()
-    to_email = (os.getenv("ALERT_TO_EMAIL") or "").strip()
-    return bool(host and user and pwd and to_email)
+    from_email = (os.getenv("SMTP_FROM_EMAIL") or os.getenv("SMTP_USER") or "").strip()
+    return bool(host and port and user and pwd and from_email)
 
 
 def _smtp_settings() -> Dict[str, Any]:
     return {
         "host": (os.getenv("SMTP_HOST") or "").strip(),
-        "port": int(os.getenv("SMTP_PORT") or "587"),
+        "port": int((os.getenv("SMTP_PORT") or "587").strip()),
         "user": (os.getenv("SMTP_USER") or "").strip(),
         "password": (os.getenv("SMTP_PASS") or "").strip(),
         "from_email": (os.getenv("SMTP_FROM_EMAIL") or os.getenv("SMTP_USER") or "").strip(),
-        "to_email": (os.getenv("ALERT_TO_EMAIL") or "").strip(),
         "use_tls": (os.getenv("SMTP_USE_TLS") or "1").strip() not in ("0", "false", "False"),
     }
 
 
-# -----------------------------
-# email sending
-# -----------------------------
-def send_email_alert(subject: str, body: str) -> Dict[str, Any]:
+def send_email_alert(to_email: str, subject: str, body: str) -> Dict[str, Any]:
     """
-    Sends a basic plain-text email. Returns {ok: bool, ...}.
-    Safe-by-default: if not configured, returns ok=False with a note.
+    Sends a basic plain-text email to the subscriber.
     """
     if not smtp_configured():
-        return {"ok": False, "note": "SMTP not configured. Set SMTP_* and ALERT_TO_EMAIL env vars."}
+        return {"ok": False, "note": "SMTP not configured. Set SMTP_* env vars."}
 
     cfg = _smtp_settings()
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = cfg["from_email"]
-    msg["To"] = cfg["to_email"]
+    msg["To"] = (to_email or "").strip().lower()
     msg.set_content(body)
 
     try:
@@ -81,30 +63,6 @@ def send_email_alert(subject: str, body: str) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-# -----------------------------
-# predictions fetch
-# -----------------------------
-def fetch_predictions(run_id: Optional[str] = None, limit: int = 500) -> List[Dict[str, Any]]:
-    """
-    Pulls latest stored predictions from the DB.
-    """
-    if run_id is None:
-        run_id = get_latest_run_id()
-    if not run_id:
-        return []
-
-    preds = get_predictions_for_run(run_id, limit=max(1, int(limit)))
-    # Ensure list[dict]
-    out: List[Dict[str, Any]] = []
-    for p in preds or []:
-        if isinstance(p, dict):
-            out.append(p)
-    return out
-
-
-# -----------------------------
-# alert logic
-# -----------------------------
 def _confidence_rank(label: str) -> int:
     lab = (label or "").upper().strip()
     if lab == "HIGH":
@@ -116,29 +74,18 @@ def _confidence_rank(label: str) -> int:
     return 0
 
 
-def cooldown_ok(user_id: str, ticker: str, cooldown_minutes: int = 60) -> bool:
+def cooldown_ok(last_sent_at: Optional[Any], cooldown_minutes: int) -> bool:
     """
-    Prevent spamming: only send once per cooldown window per ticker.
-    Uses alerts_db subscription last_sent_at.
+    Router passes last_sent_at from DB (could be None, datetime, or ISO string).
     """
+    if not last_sent_at:
+        return True
+
     try:
-        sub = get_subscription(user_id=user_id, ticker=ticker)
-        if not sub:
-            return True
-
-        last = sub.get("last_sent_at")
-        if not last:
-            return True
-
-        # last might be stored as ISO string
-        if isinstance(last, str):
-            try:
-                # accept "2026-01-22T03:00:00Z" or with offset
-                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
-            except Exception:
-                return True
-        elif isinstance(last, datetime):
-            last_dt = last
+        if isinstance(last_sent_at, str):
+            last_dt = datetime.fromisoformat(last_sent_at.replace("Z", "+00:00"))
+        elif isinstance(last_sent_at, datetime):
+            last_dt = last_sent_at
         else:
             return True
 
@@ -150,154 +97,102 @@ def cooldown_ok(user_id: str, ticker: str, cooldown_minutes: int = 60) -> bool:
         return True
 
 
-def build_alert_items(
-    subscriptions: List[Dict[str, Any]],
-    predictions: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+def run_alert_check(
+    email: str,
+    tickers: List[str],
+    min_prob_up: float,
+    min_confidence: str,
+    horizon_days: int,
+    source_pref: str,
+    max_parallel: int = 4,
+    retrain: bool = False,
+) -> Dict[str, Any]:
     """
-    Match subscriptions -> predictions and return alert items to send/log.
-    Expected subscription fields (flexible):
-      - user_id (default "demo")
-      - ticker
-      - enabled
-      - min_confidence (LOW/MEDIUM/HIGH) optional
-      - min_prob_up optional (float)
-      - cooldown_minutes optional (int)
+    Uses your existing /api/summary endpoint internally so alerts logic stays consistent.
+    This avoids re-implementing prediction logic here.
+
+    It calls:
+      GET/POST local summary handler is not directly accessible here,
+      so we import and call the same internal functions you already have in api.py:
+        - create_run / insert_predictions etc. would be heavy
+      Instead: for now, we call the live API via httpx against BASE_URL.
+
+    BASE_URL:
+      - if running on Render: use PUBLIC_BASE_URL or fallback to https://worldmarketreviewer.onrender.com
+      - if running locally: set PUBLIC_BASE_URL=http://127.0.0.1:8000
     """
-    # Build quick map for latest prediction by ticker
-    pred_by_ticker: Dict[str, Dict[str, Any]] = {}
-    for p in predictions or []:
-        t = (p.get("ticker") or "").upper().strip()
-        if t:
-            pred_by_ticker[t] = p
+    import httpx  # already in requirements
 
-    items: List[Dict[str, Any]] = []
+    base = (os.getenv("PUBLIC_BASE_URL") or "https://worldmarketreviewer.onrender.com").rstrip("/")
+    url = f"{base}/api/summary"
 
-    for sub in subscriptions or []:
-        if not sub:
-            continue
-
-        enabled = sub.get("enabled", True)
-        if enabled is False:
-            continue
-
-        user_id = (sub.get("user_id") or "demo").strip()
-        ticker = (sub.get("ticker") or "").upper().strip()
-        if not ticker:
-            continue
-
-        p = pred_by_ticker.get(ticker)
-        if not p:
-            continue
-
-        # Filters
-        min_conf = (sub.get("min_confidence") or "").upper().strip()
-        if min_conf:
-            lab = (p.get("confidence") or "").upper().strip()
-            if _confidence_rank(lab) < _confidence_rank(min_conf):
-                continue
-
-        min_prob_up = sub.get("min_prob_up")
-        try:
-            min_prob_up = float(min_prob_up) if min_prob_up is not None else None
-        except Exception:
-            min_prob_up = None
-
-        if min_prob_up is not None:
-            try:
-                pu = float(p.get("prob_up"))
-            except Exception:
-                pu = None
-            if pu is None or pu < min_prob_up:
-                continue
-
-        cooldown_minutes = sub.get("cooldown_minutes", 60)
-        try:
-            cooldown_minutes = int(cooldown_minutes)
-        except Exception:
-            cooldown_minutes = 60
-
-        if not cooldown_ok(user_id, ticker, cooldown_minutes=cooldown_minutes):
-            continue
-
-        items.append(
-            {
-                "user_id": user_id,
-                "ticker": ticker,
-                "prob_up": p.get("prob_up"),
-                "direction": p.get("direction"),
-                "confidence": p.get("confidence"),
-                "as_of_date": p.get("as_of_date"),
-                "run_id": p.get("run_id") or p.get("runId") or None,
-                "cooldown_minutes": cooldown_minutes,
-            }
-        )
-
-    return items
-
-
-def run_alert_check(user_id: str = "demo", limit_subs: int = 200) -> Dict[str, Any]:
-    """
-    End-to-end:
-      - load enabled subscriptions
-      - load latest predictions
-      - build alert items
-      - log events
-      - send emails if configured
-      - update last_sent_at
-    """
-    subs = list_enabled_subscriptions(user_id=user_id, limit=max(1, int(limit_subs)))
-    preds = fetch_predictions()
-
-    items = build_alert_items(subs, preds)
-    if not items:
-        return {"ok": True, "sent": 0, "logged": 0, "note": "No alerts to send."}
-
-    # Log events (even if SMTP isn't configured)
-    now_iso = _utc_now().isoformat()
-    events = []
-    for it in items:
-        events.append(
-            {
-                "user_id": it["user_id"],
-                "ticker": it["ticker"],
-                "event_type": "ALERT_TRIGGERED",
-                "payload": {
-                    "prob_up": it.get("prob_up"),
-                    "direction": it.get("direction"),
-                    "confidence": it.get("confidence"),
-                    "as_of_date": it.get("as_of_date"),
-                },
-                "created_at": now_iso,
-            }
-        )
-    insert_alert_events(events)
-
-    sent = 0
-    if smtp_configured():
-        # Send one email per item (simple + reliable)
-        for it in items:
-            subject = f"[WorldMarketReviewer] Alert: {it['ticker']} {it.get('direction')} ({it.get('confidence')})"
-            body = (
-                f"Ticker: {it['ticker']}\n"
-                f"Direction: {it.get('direction')}\n"
-                f"Prob Up: {it.get('prob_up')}\n"
-                f"Confidence: {it.get('confidence')}\n"
-                f"As Of: {it.get('as_of_date')}\n"
-                f"Time (UTC): {now_iso}\n"
-            )
-            r = send_email_alert(subject=subject, body=body)
-            if r.get("ok"):
-                sent += 1
-
-    # Update last_sent_at for cooldown tracking
-    for it in items:
-        set_last_sent_at(user_id=it["user_id"], ticker=it["ticker"])
-
-    return {
-        "ok": True,
-        "matched": len(items),
-        "logged": len(items),
-        "sent": sent,
-        "smtp_configured": smtp_configured(),
+    payload = {
+        "tickers": tickers,
+        "retrain": bool(retrain),
+        "horizon_days": int(horizon_days),
+        "base_weekly_move": 0.02,
+        "max_parallel": int(max_parallel),
+        "min_confidence": None,
+        "min_prob_up": None,
+        "source_pref": source_pref,
     }
+
+    errors: Dict[str, Any] = {}
+    hits: List[Dict[str, Any]] = []
+
+    try:
+        with httpx.Client(timeout=60) as client:
+            r = client.post(url, json=payload)
+            if r.status_code != 200:
+                return {
+                    "ok": False,
+                    "hits": [],
+                    "errors": {"summary_http": f"{r.status_code}: {r.text[:200]}"},
+                }
+            summary = r.json()
+    except Exception as e:
+        return {"ok": False, "hits": [], "errors": {"summary_call": str(e)}}
+
+    rows = summary.get("rows") or summary.get("results") or summary.get("summary") or []
+    if not isinstance(rows, list):
+        rows = []
+
+    want_conf = (min_confidence or "MEDIUM").upper().strip()
+    want_prob = float(min_prob_up or 0.65)
+
+    for row in rows:
+        try:
+            t = (row.get("ticker") or "").upper().strip()
+            if not t:
+                continue
+
+            pu = row.get("prob_up")
+            try:
+                pu_f = float(pu)
+            except Exception:
+                pu_f = None
+
+            conf = (row.get("confidence") or row.get("confidence_label") or "").upper().strip()
+            as_of = row.get("as_of_date") or row.get("date") or row.get("as_of") or None
+            src = row.get("source") or row.get("data_source") or None
+
+            if pu_f is None:
+                continue
+            if pu_f < want_prob:
+                continue
+            if conf and _confidence_rank(conf) < _confidence_rank(want_conf):
+                continue
+
+            hits.append(
+                {
+                    "ticker": t,
+                    "prob_up": pu_f,
+                    "confidence": conf or "UNKNOWN",
+                    "as_of_date": as_of,
+                    "source": src,
+                }
+            )
+        except Exception as e:
+            errors[str(row.get("ticker") or "row_error")] = str(e)
+
+    return {"ok": True, "hits": hits, "errors": errors}

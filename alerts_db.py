@@ -1,4 +1,3 @@
-# alerts_db.py (PART 1/2)
 import os
 import json
 from datetime import datetime, timezone
@@ -20,6 +19,10 @@ def _connect():
     return psycopg2.connect(url, sslmode=os.getenv("PGSSLMODE", "require"))
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def init_alerts_db() -> Dict[str, Any]:
     """
     Creates the alerts tables if they don't exist.
@@ -27,35 +30,35 @@ def init_alerts_db() -> Dict[str, Any]:
     """
     url = _db_url()
     if not url:
-        # Local dev: don't crash your whole API just because DB isn't configured
         return {"ok": True, "skipped": True, "reason": "DATABASE_URL not set"}
 
     ddl = """
     CREATE TABLE IF NOT EXISTS alert_subscriptions (
         id BIGSERIAL PRIMARY KEY,
-        user_id TEXT NOT NULL DEFAULT 'demo',
-        ticker TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
         enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        direction TEXT NOT NULL DEFAULT 'UP',            -- UP or DOWN
-        threshold_prob DOUBLE PRECISION NOT NULL DEFAULT 0.65,
-        language TEXT NOT NULL DEFAULT 'English',
-        country TEXT,
+        tickers TEXT NOT NULL,                           -- CSV: "SPY,QQQ,NVDA"
+        min_prob_up DOUBLE PRECISION NOT NULL DEFAULT 0.65,
+        min_confidence TEXT NOT NULL DEFAULT 'MEDIUM',   -- LOW/MEDIUM/HIGH
+        horizon_days INTEGER NOT NULL DEFAULT 5,
+        source_pref TEXT NOT NULL DEFAULT 'auto',        -- auto/cache/live
+        cooldown_minutes INTEGER NOT NULL DEFAULT 360,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         last_sent_at TIMESTAMPTZ
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS alert_subscriptions_unique
-      ON alert_subscriptions (user_id, ticker);
-
     CREATE TABLE IF NOT EXISTS alert_events (
         id BIGSERIAL PRIMARY KEY,
-        user_id TEXT NOT NULL DEFAULT 'demo',
+        email TEXT NOT NULL,
         ticker TEXT NOT NULL,
-        event_type TEXT NOT NULL,                       -- 'ALERT_SENT', 'ALERT_SKIPPED', etc.
+        event_type TEXT NOT NULL,                        -- ALERT_TRIGGERED, EMAIL_SENT, EMAIL_SKIPPED, ERROR
         payload JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE INDEX IF NOT EXISTS alert_events_email_created_at
+      ON alert_events (email, created_at DESC);
 
     CREATE INDEX IF NOT EXISTS alert_events_ticker_created_at
       ON alert_events (ticker, created_at DESC);
@@ -70,97 +73,110 @@ def init_alerts_db() -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-def _utcnow():
-    return datetime.now(timezone.utc)
-
-
-def upsert_subscription(
-    user_id: str,
-    ticker: str,
-    enabled: bool = True,
-    direction: str = "UP",
-    threshold_prob: float = 0.65,
-    language: str = "English",
-    country: Optional[str] = None,
-) -> Dict[str, Any]:
+def upsert_subscription(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Router passes a dict with keys:
+      email, enabled, tickers, min_prob_up, min_confidence, horizon_days, source_pref, cooldown_minutes
+    """
     url = _db_url()
     if not url:
         return {"ok": False, "error": "DATABASE_URL not set"}
 
-    user_id = (user_id or "demo").strip() or "demo"
-    ticker = (ticker or "").upper().strip()
-    direction = (direction or "UP").upper().strip()
-    language = (language or "English").strip() or "English"
-    country = (country or None)
+    email = (data.get("email") or "").strip().lower()
+    enabled = bool(data.get("enabled", True))
+    tickers = (data.get("tickers") or "").strip()
+    min_prob_up = float(data.get("min_prob_up", 0.65))
+    min_confidence = (data.get("min_confidence") or "MEDIUM").upper().strip()
+    horizon_days = int(data.get("horizon_days", 5))
+    source_pref = (data.get("source_pref") or "auto").lower().strip()
+    cooldown_minutes = int(data.get("cooldown_minutes", 360))
 
-    if not ticker:
-        return {"ok": False, "error": "ticker required"}
-    if direction not in ("UP", "DOWN"):
-        direction = "UP"
+    if not email:
+        return {"ok": False, "error": "email required"}
+    if not tickers:
+        return {"ok": False, "error": "tickers required"}
+    if min_confidence not in ("LOW", "MEDIUM", "HIGH"):
+        min_confidence = "MEDIUM"
+    if source_pref not in ("auto", "cache", "live"):
+        source_pref = "auto"
 
     q = """
-    INSERT INTO alert_subscriptions (user_id, ticker, enabled, direction, threshold_prob, language, country, updated_at)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-    ON CONFLICT (user_id, ticker)
+    INSERT INTO alert_subscriptions
+      (email, enabled, tickers, min_prob_up, min_confidence, horizon_days, source_pref, cooldown_minutes, updated_at)
+    VALUES
+      (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+    ON CONFLICT (email)
     DO UPDATE SET
       enabled = EXCLUDED.enabled,
-      direction = EXCLUDED.direction,
-      threshold_prob = EXCLUDED.threshold_prob,
-      language = EXCLUDED.language,
-      country = EXCLUDED.country,
+      tickers = EXCLUDED.tickers,
+      min_prob_up = EXCLUDED.min_prob_up,
+      min_confidence = EXCLUDED.min_confidence,
+      horizon_days = EXCLUDED.horizon_days,
+      source_pref = EXCLUDED.source_pref,
+      cooldown_minutes = EXCLUDED.cooldown_minutes,
       updated_at = NOW()
-    RETURNING id, user_id, ticker, enabled, direction, threshold_prob, language, country, last_sent_at, updated_at;
+    RETURNING id, email, enabled, tickers, min_prob_up, min_confidence, horizon_days, source_pref, cooldown_minutes, last_sent_at, created_at, updated_at;
     """
 
     try:
         with _connect() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(q, (user_id, ticker, bool(enabled), direction, float(threshold_prob), language, country))
+                cur.execute(
+                    q,
+                    (
+                        email,
+                        enabled,
+                        tickers,
+                        min_prob_up,
+                        min_confidence,
+                        horizon_days,
+                        source_pref,
+                        cooldown_minutes,
+                    ),
+                )
                 row = cur.fetchone()
-        return {"ok": True, "subscription": dict(row) if row else None}
+        return dict(row) if row else {}
     except Exception as e:
         return {"ok": False, "error": str(e)}
-# alerts_db.py (PART 2/2)
 
-def get_subscription(user_id: str, ticker: str) -> Optional[Dict[str, Any]]:
+
+def get_subscription(email: str) -> Optional[Dict[str, Any]]:
     url = _db_url()
     if not url:
         return None
 
-    user_id = (user_id or "demo").strip() or "demo"
-    ticker = (ticker or "").upper().strip()
-    if not ticker:
+    email = (email or "").strip().lower()
+    if not email:
         return None
 
     q = """
-    SELECT id, user_id, ticker, enabled, direction, threshold_prob, language, country, last_sent_at, created_at, updated_at
+    SELECT id, email, enabled, tickers, min_prob_up, min_confidence, horizon_days, source_pref, cooldown_minutes, last_sent_at, created_at, updated_at
     FROM alert_subscriptions
-    WHERE user_id = %s AND ticker = %s
+    WHERE email = %s
     LIMIT 1;
     """
 
     try:
         with _connect() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(q, (user_id, ticker))
+                cur.execute(q, (email,))
                 row = cur.fetchone()
         return dict(row) if row else None
     except Exception:
         return None
 
 
-def list_enabled_subscriptions(user_id: str = "demo", limit: int = 200) -> List[Dict[str, Any]]:
+def list_enabled_subscriptions(limit: int = 200) -> List[Dict[str, Any]]:
     url = _db_url()
     if not url:
         return []
 
-    user_id = (user_id or "demo").strip() or "demo"
     limit = max(1, min(2000, int(limit)))
 
     q = """
-    SELECT id, user_id, ticker, enabled, direction, threshold_prob, language, country, last_sent_at, created_at, updated_at
+    SELECT id, email, enabled, tickers, min_prob_up, min_confidence, horizon_days, source_pref, cooldown_minutes, last_sent_at, created_at, updated_at
     FROM alert_subscriptions
-    WHERE user_id = %s AND enabled = TRUE
+    WHERE enabled = TRUE
     ORDER BY updated_at DESC
     LIMIT %s;
     """
@@ -168,69 +184,75 @@ def list_enabled_subscriptions(user_id: str = "demo", limit: int = 200) -> List[
     try:
         with _connect() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(q, (user_id, limit))
+                cur.execute(q, (limit,))
                 rows = cur.fetchall() or []
         return [dict(r) for r in rows]
     except Exception:
         return []
 
 
-def set_last_sent_at(user_id: str, ticker: str, when_utc: Optional[datetime] = None) -> Dict[str, Any]:
+def set_last_sent_at(email: str, when_iso_utc: str) -> Dict[str, Any]:
+    """
+    Router calls set_last_sent_at(email, now_iso_string)
+    """
     url = _db_url()
     if not url:
         return {"ok": False, "error": "DATABASE_URL not set"}
 
-    user_id = (user_id or "demo").strip() or "demo"
-    ticker = (ticker or "").upper().strip()
-    if not ticker:
-        return {"ok": False, "error": "ticker required"}
+    email = (email or "").strip().lower()
+    if not email:
+        return {"ok": False, "error": "email required"}
 
-    when_utc = when_utc or _utcnow()
+    # Accept ISO string from router, store as timestamptz
+    when_dt = None
+    try:
+        when_dt = datetime.fromisoformat(when_iso_utc.replace("Z", "+00:00"))
+    except Exception:
+        when_dt = _utcnow()
 
     q = """
     UPDATE alert_subscriptions
     SET last_sent_at = %s, updated_at = NOW()
-    WHERE user_id = %s AND ticker = %s
-    RETURNING id, user_id, ticker, last_sent_at, updated_at;
+    WHERE email = %s
+    RETURNING id, email, last_sent_at, updated_at;
     """
 
     try:
         with _connect() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(q, (when_utc, user_id, ticker))
+                cur.execute(q, (when_dt, email))
                 row = cur.fetchone()
         return {"ok": True, "subscription": dict(row) if row else None}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
-def insert_alert_events(
-    events: List[Dict[str, Any]],
-    user_id: str = "demo",
-) -> Dict[str, Any]:
+def insert_alert_events(email: str, hits: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Insert multiple alert_events rows.
-    Each event dict should include: ticker, event_type, payload (optional)
+    Router calls insert_alert_events(email, hits)
+    Each hit is expected to contain at least: ticker, prob_up, confidence, as_of_date, source
+    We store event_type='ALERT_TRIGGERED' with payload=hit.
     """
     url = _db_url()
     if not url:
         return {"ok": False, "error": "DATABASE_URL not set"}
 
-    user_id = (user_id or "demo").strip() or "demo"
+    email = (email or "").strip().lower()
+    if not email:
+        return {"ok": False, "error": "email required"}
+
     rows = []
-    for e in events or []:
-        ticker = (e.get("ticker") or "").upper().strip()
-        event_type = (e.get("event_type") or "").strip()
-        payload = e.get("payload") or {}
-        if not ticker or not event_type:
+    for h in hits or []:
+        ticker = (h.get("ticker") or "").upper().strip()
+        if not ticker:
             continue
-        rows.append((user_id, ticker, event_type, json.dumps(payload)))
+        rows.append((email, ticker, "ALERT_TRIGGERED", json.dumps(h)))
 
     if not rows:
         return {"ok": True, "inserted": 0}
 
     q = """
-    INSERT INTO alert_events (user_id, ticker, event_type, payload)
+    INSERT INTO alert_events (email, ticker, event_type, payload)
     VALUES (%s, %s, %s, %s::jsonb);
     """
 
@@ -243,42 +265,29 @@ def insert_alert_events(
         return {"ok": False, "error": str(e)}
 
 
-def get_alert_events(
-    user_id: str = "demo",
-    ticker: Optional[str] = None,
-    limit: int = 200,
-) -> List[Dict[str, Any]]:
+def get_alert_events(email: str, limit: int = 200) -> List[Dict[str, Any]]:
     url = _db_url()
     if not url:
         return []
 
-    user_id = (user_id or "demo").strip() or "demo"
-    limit = max(1, min(2000, int(limit)))
-    ticker = (ticker or "").upper().strip() if ticker else None
+    email = (email or "").strip().lower()
+    if not email:
+        return []
 
-    if ticker:
-        q = """
-        SELECT id, user_id, ticker, event_type, payload, created_at
-        FROM alert_events
-        WHERE user_id = %s AND ticker = %s
-        ORDER BY created_at DESC
-        LIMIT %s;
-        """
-        params = (user_id, ticker, limit)
-    else:
-        q = """
-        SELECT id, user_id, ticker, event_type, payload, created_at
-        FROM alert_events
-        WHERE user_id = %s
-        ORDER BY created_at DESC
-        LIMIT %s;
-        """
-        params = (user_id, limit)
+    limit = max(1, min(2000, int(limit)))
+
+    q = """
+    SELECT id, email, ticker, event_type, payload, created_at
+    FROM alert_events
+    WHERE email = %s
+    ORDER BY created_at DESC
+    LIMIT %s;
+    """
 
     try:
         with _connect() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(q, params)
+                cur.execute(q, (email, limit))
                 rows = cur.fetchall() or []
         return [dict(r) for r in rows]
     except Exception:
