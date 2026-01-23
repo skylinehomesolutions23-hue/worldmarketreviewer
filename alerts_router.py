@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 from alerts_db import (
     init_alerts_db,
@@ -14,7 +14,6 @@ from alerts_db import (
     set_last_sent_at,
     upsert_subscription,
 )
-
 
 from alerts_engine import cooldown_ok, run_alert_check, send_email_alert, smtp_configured
 
@@ -28,7 +27,7 @@ def _parse_tickers(x: Any) -> List[str]:
         raw = [str(v) for v in x]
     else:
         raw = str(x).replace(" ", ",").split(",")
-    out = []
+    out: List[str] = []
     seen = set()
     for t in raw:
         tk = (t or "").upper().strip()
@@ -40,7 +39,7 @@ def _parse_tickers(x: Any) -> List[str]:
 
 
 class SubscribeRequest(BaseModel):
-    email: str
+    email: EmailStr
     enabled: bool = True
     tickers: Any
     min_prob_up: float = 0.65
@@ -52,22 +51,27 @@ class SubscribeRequest(BaseModel):
 
 @router.get("/health")
 def alerts_health():
+    # Ensure DB exists + schema created
+    init_alerts_db()
     return {
         "ok": True,
         "smtp_configured": smtp_configured(),
+        "cron_key_set": bool((os.getenv("ALERTS_CRON_KEY") or "").strip()),
         "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
 
 
 @router.post("/subscribe")
 def subscribe(req: SubscribeRequest):
+    init_alerts_db()
+
     tickers = _parse_tickers(req.tickers)
     if not tickers:
         return {"ok": False, "error": "tickers is required (up to 10)"}
 
     sub = upsert_subscription(
         {
-            "email": req.email,
+            "email": (req.email or "").strip().lower(),
             "enabled": bool(req.enabled),
             "tickers": ",".join(tickers),
             "min_prob_up": float(req.min_prob_up),
@@ -77,23 +81,34 @@ def subscribe(req: SubscribeRequest):
             "cooldown_minutes": int(req.cooldown_minutes),
         }
     )
+    # normalize tickers to list for client convenience
+    sub["tickers_list"] = _parse_tickers(sub.get("tickers"))
     return {"ok": True, "subscription": sub}
 
 
 @router.get("/subscription")
 def subscription(email: str):
+    init_alerts_db()
+
     sub = get_subscription(email)
     if not sub:
         return {"ok": False, "error": "Not found"}
-    # normalize tickers to list for client convenience
     sub["tickers_list"] = _parse_tickers(sub.get("tickers"))
     return {"ok": True, "subscription": sub}
 
 
 @router.get("/events")
 def events(email: str, limit: int = 100):
+    init_alerts_db()
+
+    limit = max(1, min(2000, int(limit)))
     rows = get_alert_events(email, limit=limit)
-    return {"ok": True, "email": (email or "").strip().lower(), "returned": len(rows), "events": rows}
+    return {
+        "ok": True,
+        "email": (email or "").strip().lower(),
+        "returned": len(rows),
+        "events": rows,
+    }
 
 
 @router.post("/run")
@@ -107,8 +122,13 @@ def run_all(
     - If email provided: run only for that subscription.
     - Otherwise runs for all enabled subscriptions.
     Protect with ALERTS_CRON_KEY on Render.
+
+    Render Cron calls:
+      /api/alerts/run?key=ALERTS_CRON_KEY
     """
-    cron_key = os.getenv("ALERTS_CRON_KEY", "").strip()
+    init_alerts_db()
+
+    cron_key = (os.getenv("ALERTS_CRON_KEY") or "").strip()
     if cron_key:
         if (key or "").strip() != cron_key:
             return {"ok": False, "error": "Unauthorized (bad key)"}
@@ -132,8 +152,8 @@ def run_all(
         checked += 1
 
         em = (sub.get("email") or "").strip().lower()
-        tickers = (sub.get("tickers") or "").strip()
-        tickers_list = [t for t in tickers.replace(" ", ",").split(",") if t.strip()]
+        tickers_csv = (sub.get("tickers") or "").strip()
+        tickers_list = [t for t in tickers_csv.replace(" ", ",").split(",") if t.strip()]
         tickers_list = [t.upper().strip() for t in tickers_list if t.strip()][:10]
 
         min_prob_up = float(sub.get("min_prob_up") or 0.65)
@@ -169,7 +189,7 @@ def run_all(
 
         if hits and allow_send:
             subject = f"WorldMarketReviewer Alerts ({len(hits)})"
-            lines = []
+            lines: List[str] = []
             lines.append(f"Alert trigger time (UTC): {now}")
             lines.append(f"Rule: prob_up≥{min_prob_up:.2f} & conf≥{min_confidence}")
             lines.append(f"Horizon: {horizon_days} trading days")
@@ -182,7 +202,7 @@ def run_all(
             lines.append("Tip: Too many emails? Increase cooldown_minutes in your subscription.")
 
             email_result = send_email_alert(em, subject, "\n".join(lines))
-            if email_result.get("ok"):
+            if isinstance(email_result, dict) and email_result.get("ok"):
                 did_send = True
                 sent += 1
                 set_last_sent_at(em, now)
@@ -207,138 +227,4 @@ def run_all(
         "total_hits": total_hits,
         "results_sample": results[:25],
         "note": "Use Render Cron to call /api/alerts/run?key=... on a schedule.",
-    }
-import os
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, EmailStr
-
-from alerts_db import (
-    get_alert_events,
-    get_subscription,
-    insert_alert_events,
-    list_enabled_subscriptions,
-    set_last_sent_at,
-    upsert_subscription,
-)
-from alerts_engine import build_alert_items, fetch_predictions, smtp_configured
-
-router = APIRouter(prefix="/api/alerts", tags=["alerts"])
-
-
-class SubscribeRequest(BaseModel):
-    email: EmailStr
-    tickers: List[str]
-    horizon_days: int = 5
-    min_confidence: str = "MEDIUM"
-
-
-def _normalize_tickers(tickers: List[str]) -> List[str]:
-    seen = set()
-    out = []
-    for t in tickers or []:
-        t = (t or "").upper().strip()
-        if not t:
-            continue
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out[:10]  # enforce max 10
-
-
-def _cron_key() -> str:
-    return (os.getenv("ALERTS_CRON_KEY") or "").strip()
-
-
-@router.get("/health")
-def health():
-    return {
-        "ok": True,
-        "smtp_configured": smtp_configured(),
-        "cron_key_set": bool(_cron_key()),
-        "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-    }
-
-
-@router.post("/subscribe")
-def subscribe(req: SubscribeRequest):
-    tickers = _normalize_tickers(req.tickers)
-    if not tickers:
-        raise HTTPException(status_code=400, detail="Provide at least one ticker.")
-    tickers_csv = ",".join(tickers)
-
-    row = add_subscription(
-        email=req.email,
-        tickers_csv=tickers_csv,
-        horizon_days=int(req.horizon_days),
-        min_confidence=(req.min_confidence or "MEDIUM").upper().strip(),
-    )
-    return {"ok": True, "subscription": row}
-
-
-@router.get("/subscriptions")
-def subscriptions(limit: int = 200):
-    limit = max(1, min(2000, int(limit)))
-    rows = list_subscriptions(limit=limit)
-    return {"ok": True, "count": len(rows), "rows": rows}
-
-
-@router.delete("/subscriptions/{sub_id}")
-def unsubscribe(sub_id: int):
-    ok = delete_subscription(sub_id)
-    return {"ok": ok}
-
-
-@router.post("/run")
-def run_alerts(
-    key: str,
-    source_pref: str = "auto",
-):
-    """
-    This is what a Render Cron Job will call.
-    It requires ?key=ALERTS_CRON_KEY so random users can't run it.
-    """
-    if not _cron_key():
-        raise HTTPException(status_code=500, detail="ALERTS_CRON_KEY not configured on server.")
-    if key != _cron_key():
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    rows = list_subscriptions(limit=500)
-
-    sent = 0
-    checked = 0
-    preview: List[Dict[str, Any]] = []
-
-    for sub in rows:
-        checked += 1
-        tickers_csv = (sub.get("tickers") or "").strip()
-        tickers = [t.strip().upper() for t in tickers_csv.split(",") if t.strip()]
-        horizon_days = int(sub.get("horizon_days") or 5)
-        min_conf = (sub.get("min_confidence") or "MEDIUM").upper().strip()
-
-        try:
-            summary_json = fetch_predictions(tickers=tickers, horizon_days=horizon_days, source_pref=source_pref)
-            items = build_alert_items(summary_json, min_confidence=min_conf)
-        except Exception as e:
-            preview.append({"email": sub.get("email"), "error": str(e)})
-            continue
-
-        # For now we don't send emails; we just mark as "sent" if any items matched
-        if items:
-            mark_sent(int(sub["id"]))
-            sent += 1
-            preview.append({"email": sub.get("email"), "count": len(items), "top": items[:3]})
-        else:
-            preview.append({"email": sub.get("email"), "count": 0})
-
-    return {
-        "ok": True,
-        "checked": checked,
-        "sent": sent,
-        "source_pref": source_pref,
-        "preview": preview[:25],
-        "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "note": "Email delivery not enabled yet; this is a safe dry-run that marks last_sent_at.",
     }
