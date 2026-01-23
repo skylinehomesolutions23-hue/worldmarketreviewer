@@ -13,6 +13,7 @@ from alerts_db import (
     set_last_sent_at,
     upsert_subscription,
 )
+
 from alerts_engine import cooldown_ok, run_alert_check, send_email_alert, smtp_configured
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
@@ -212,7 +213,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 
-from alerts_db import (
+from alerts_dp import (
     add_subscription,
     delete_subscription,
     init_alerts_db,
