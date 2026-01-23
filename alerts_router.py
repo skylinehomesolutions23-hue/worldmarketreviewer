@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter
 from pydantic import BaseModel, EmailStr
@@ -49,9 +50,43 @@ class SubscribeRequest(BaseModel):
     cooldown_minutes: int = 360  # 6 hours
 
 
+def _db_info_safe() -> Dict[str, Any]:
+    """
+    Returns safe parsed DATABASE_URL parts (no password).
+    Also helps detect newline/whitespace issues.
+    """
+    raw = os.getenv("DATABASE_URL") or ""
+    raw_stripped = raw.strip()
+
+    info: Dict[str, Any] = {
+        "database_url_set": bool(raw),
+        "database_url_stripped_differs": raw != raw_stripped,
+        "database_url_len": len(raw),
+        "database_url_stripped_len": len(raw_stripped),
+    }
+
+    try:
+        u = urlparse(raw_stripped)
+        # u.path is like "/postgres"
+        dbname = (u.path or "").lstrip("/")
+        info.update(
+            {
+                "scheme": u.scheme,
+                "host": u.hostname,
+                "port": u.port,
+                "user": u.username,
+                "db_name": dbname,
+                "db_name_repr": repr(dbname),
+            }
+        )
+    except Exception as e:
+        info["parse_error"] = str(e)
+
+    return info
+
+
 @router.get("/health")
 def alerts_health():
-    # Ensure DB exists + schema created
     init_alerts_db()
     return {
         "ok": True,
@@ -59,6 +94,12 @@ def alerts_health():
         "cron_key_set": bool((os.getenv("ALERTS_CRON_KEY") or "").strip()),
         "time_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
+
+
+@router.get("/db_info")
+def db_info():
+    # safe debug endpoint (no password)
+    return {"ok": True, "db": _db_info_safe()}
 
 
 @router.post("/subscribe")
@@ -81,8 +122,11 @@ def subscribe(req: SubscribeRequest):
             "cooldown_minutes": int(req.cooldown_minutes),
         }
     )
-    # normalize tickers to list for client convenience
-    sub["tickers_list"] = _parse_tickers(sub.get("tickers"))
+
+    # normalize tickers to list for client convenience (even if db failed)
+    if isinstance(sub, dict):
+        sub["tickers_list"] = _parse_tickers(sub.get("tickers"))
+
     return {"ok": True, "subscription": sub}
 
 
@@ -117,15 +161,6 @@ def run_all(
     email: Optional[str] = None,
     max_parallel: int = 4,
 ):
-    """
-    Cron-safe endpoint.
-    - If email provided: run only for that subscription.
-    - Otherwise runs for all enabled subscriptions.
-    Protect with ALERTS_CRON_KEY on Render.
-
-    Render Cron calls:
-      /api/alerts/run?key=ALERTS_CRON_KEY
-    """
     init_alerts_db()
 
     cron_key = (os.getenv("ALERTS_CRON_KEY") or "").strip()
@@ -163,7 +198,6 @@ def run_all(
         cooldown_minutes = int(sub.get("cooldown_minutes") or 360)
         last_sent_at = sub.get("last_sent_at")
 
-        # Only email if cooldown passed
         allow_send = cooldown_ok(last_sent_at, cooldown_minutes)
 
         run = run_alert_check(
@@ -181,7 +215,6 @@ def run_all(
         total_hits += len(hits)
 
         if hits:
-            # store hits
             insert_alert_events(em, hits)
 
         did_send = False
