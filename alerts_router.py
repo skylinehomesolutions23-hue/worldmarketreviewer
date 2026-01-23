@@ -215,12 +215,13 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 
-from alerts_dp import (
-    add_subscription,
-    delete_subscription,
-    init_alerts_db,
-    list_subscriptions,
-    mark_sent,
+from alerts_db import (
+    get_alert_events,
+    get_subscription,
+    insert_alert_events,
+    list_enabled_subscriptions,
+    set_last_sent_at,
+    upsert_subscription,
 )
 from alerts_engine import build_alert_items, fetch_predictions, smtp_configured
 
