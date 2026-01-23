@@ -1,68 +1,99 @@
+# alerts_engine.py
 import os
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional, List
 
-import httpx
-
-
-def _base_url() -> str:
-    # Render primary URL should work, or local fallback.
-    return (os.getenv("API_BASE") or "https://worldmarketreviewer.onrender.com").rstrip("/")
-
-
-def _cron_key() -> str:
-    return (os.getenv("ALERTS_CRON_KEY") or "").strip()
-
-
-def _min_rank(label: str) -> int:
-    lab = (label or "").upper().strip()
-    if lab == "HIGH":
-        return 3
-    if lab == "MEDIUM":
-        return 2
-    if lab == "LOW":
-        return 1
-    return 0
-
-
-def should_alert(pred: Dict[str, Any], min_confidence: str) -> bool:
-    """
-    pred: one item from /api/summary predictions list.
-    """
-    want = _min_rank(min_confidence)
-    got = _min_rank(pred.get("confidence") or "")
-    return got >= want
-
-
-def fetch_predictions(tickers: List[str], horizon_days: int = 5, source_pref: str = "auto") -> Dict[str, Any]:
-    """
-    Calls your own backend /api/summary to get predictions.
-    """
-    url = f"{_base_url()}/api/summary"
-    payload = {
-        "tickers": tickers,
-        "horizon_days": int(horizon_days),
-        "retrain": True,
-        "max_parallel": 1,
-        "source_pref": source_pref,
-    }
-
-    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        r = client.post(url, json=payload)
-        r.raise_for_status()
-        return r.json()
-
-
-def build_alert_items(summary_json: Dict[str, Any], min_confidence: str) -> List[Dict[str, Any]]:
-    preds = summary_json.get("predictions") or []
-    items = []
-    for p in preds:
-        if should_alert(p, min_confidence=min_confidence):
-            items.append(p)
-    return items
-
+# -------------------------------------------------
+# Email / SMTP (stub-safe)
+# -------------------------------------------------
 
 def smtp_configured() -> bool:
-    # Placeholder: you’ll wire actual SMTP later.
-    # For now this returns False so health endpoint can show status.
-    return bool(os.getenv("SMTP_HOST")) and bool(os.getenv("SMTP_USER"))
+    """
+    Returns True if SMTP env vars are present.
+    Safe to call even if email isn't set up yet.
+    """
+    return bool(
+        os.getenv("SMTP_HOST")
+        and os.getenv("SMTP_USER")
+        and os.getenv("SMTP_PASSWORD")
+    )
+
+
+def send_email_alert(
+    to_email: str,
+    subject: str,
+    body: str,
+) -> Dict[str, Any]:
+    """
+    Placeholder email sender.
+    Does NOT crash if SMTP isn't configured.
+    """
+    if not smtp_configured():
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "SMTP not configured",
+        }
+
+    # You can implement real SMTP later
+    # For now, keep API stable
+    return {
+        "ok": True,
+        "sent": False,
+        "note": "SMTP configured but send not implemented yet",
+    }
+
+
+# -------------------------------------------------
+# Alert logic
+# -------------------------------------------------
+
+def cooldown_ok(
+    last_sent_at: Optional[datetime],
+    cooldown_minutes: int = 60,
+) -> bool:
+    """
+    Prevents alert spam.
+    Returns True if enough time has passed.
+    """
+    if last_sent_at is None:
+        return True
+
+    if last_sent_at.tzinfo is None:
+        last_sent_at = last_sent_at.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    return now - last_sent_at >= timedelta(minutes=cooldown_minutes)
+
+
+def run_alert_check(
+    subscription: Dict[str, Any],
+    prediction: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Decides whether an alert should fire.
+    This is intentionally simple and deterministic.
+    """
+
+    if not subscription.get("enabled", False):
+        return {"fire": False, "reason": "disabled"}
+
+    prob_up = prediction.get("prob_up")
+    direction = prediction.get("direction")
+    threshold = subscription.get("threshold_prob", 0.65)
+
+    if prob_up is None:
+        return {"fire": False, "reason": "missing_prob"}
+
+    if direction != subscription.get("direction", "UP"):
+        return {"fire": False, "reason": "direction_mismatch"}
+
+    if float(prob_up) < float(threshold):
+        return {"fire": False, "reason": "below_threshold"}
+
+    return {
+        "fire": True,
+        "reason": "threshold_met",
+        "prob_up": prob_up,
+        "threshold": threshold,
+    }
