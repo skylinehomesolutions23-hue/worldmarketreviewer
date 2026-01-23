@@ -6,6 +6,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from alerts_db import (
+    init_alerts_db,
     get_alert_events,
     get_subscription,
     insert_alert_events,
@@ -13,6 +14,7 @@ from alerts_db import (
     set_last_sent_at,
     upsert_subscription,
 )
+
 
 from alerts_engine import cooldown_ok, run_alert_check, send_email_alert, smtp_configured
 
