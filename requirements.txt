@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 pydantic
+email-validator>=2.1.0
 numpy
 pandas
 scikit-learn
