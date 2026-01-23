@@ -11,3 +11,4 @@ yfinance
 python-dateutil
 psycopg2-binary
 httpx==0.28.1
+email-validator
