@@ -17,7 +17,7 @@ from data_loader import load_stock_data
 from feature_engineering import build_features
 from walk_forward import walk_forward_predict_proba
 
-from alerts_db import init_alerts_db
+from alerts_dp import init_alerts_db
 from alerts_router import router as alerts_router
 
 from db import (
