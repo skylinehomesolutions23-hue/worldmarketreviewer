@@ -4,16 +4,14 @@ from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+import httpx
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
 def smtp_configured() -> bool:
-    """
-    Subscriber-email mode:
-      SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM_EMAIL must be set.
-    """
     host = (os.getenv("SMTP_HOST") or "").strip()
     port = (os.getenv("SMTP_PORT") or "").strip()
     user = (os.getenv("SMTP_USER") or "").strip()
@@ -34,9 +32,6 @@ def _smtp_settings() -> Dict[str, Any]:
 
 
 def send_email_alert(to_email: str, subject: str, body: str) -> Dict[str, Any]:
-    """
-    Sends a basic plain-text email to the subscriber.
-    """
     if not smtp_configured():
         return {"ok": False, "note": "SMTP not configured. Set SMTP_* env vars."}
 
@@ -75,9 +70,6 @@ def _confidence_rank(label: str) -> int:
 
 
 def cooldown_ok(last_sent_at: Optional[Any], cooldown_minutes: int) -> bool:
-    """
-    Router passes last_sent_at from DB (could be None, datetime, or ISO string).
-    """
     if not last_sent_at:
         return True
 
@@ -108,21 +100,9 @@ def run_alert_check(
     retrain: bool = False,
 ) -> Dict[str, Any]:
     """
-    Uses your existing /api/summary endpoint internally so alerts logic stays consistent.
-    This avoids re-implementing prediction logic here.
-
-    It calls:
-      GET/POST local summary handler is not directly accessible here,
-      so we import and call the same internal functions you already have in api.py:
-        - create_run / insert_predictions etc. would be heavy
-      Instead: for now, we call the live API via httpx against BASE_URL.
-
-    BASE_URL:
-      - if running on Render: use PUBLIC_BASE_URL or fallback to https://worldmarketreviewer.onrender.com
-      - if running locally: set PUBLIC_BASE_URL=http://127.0.0.1:8000
+    Calls your own /api/summary endpoint and filters rows to produce alert hits.
+    This avoids duplicating prediction logic here.
     """
-    import httpx  # already in requirements
-
     base = (os.getenv("PUBLIC_BASE_URL") or "https://worldmarketreviewer.onrender.com").rstrip("/")
     url = f"{base}/api/summary"
 
@@ -166,9 +146,8 @@ def run_alert_check(
             if not t:
                 continue
 
-            pu = row.get("prob_up")
             try:
-                pu_f = float(pu)
+                pu_f = float(row.get("prob_up"))
             except Exception:
                 pu_f = None
 

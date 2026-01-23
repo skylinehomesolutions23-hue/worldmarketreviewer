@@ -15,7 +15,6 @@ def _connect():
     url = _db_url()
     if not url:
         raise RuntimeError("DATABASE_URL not set")
-    # Supabase commonly needs SSL
     return psycopg2.connect(url, sslmode=os.getenv("PGSSLMODE", "require"))
 
 
@@ -203,8 +202,6 @@ def set_last_sent_at(email: str, when_iso_utc: str) -> Dict[str, Any]:
     if not email:
         return {"ok": False, "error": "email required"}
 
-    # Accept ISO string from router, store as timestamptz
-    when_dt = None
     try:
         when_dt = datetime.fromisoformat(when_iso_utc.replace("Z", "+00:00"))
     except Exception:
