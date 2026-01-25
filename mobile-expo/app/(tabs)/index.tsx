@@ -12,6 +12,7 @@ import {
   View,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { router } from "expo-router";
 
 // If "@/..." alias doesn't work in your project, change this line to:
 // import BeginnerHelp from "../../components/BeginnerHelp";
@@ -161,6 +162,14 @@ function sourcePrefHelp(sp: SourcePref): string {
   if (sp === "auto") return "Auto chooses the best option (usually cache first, then live if needed).";
   if (sp === "cache") return "Cache prefers saved CSVs (faster, avoids rate limits).";
   return "Live forces a fresh fetch (slower, can rate-limit).";
+}
+
+function goToNews(ticker?: string) {
+  const tk = String(ticker || "").toUpperCase().trim();
+  router.push({
+    pathname: "/(tabs)/news",
+    params: tk ? { ticker: tk } : {},
+  });
 }
 
 export default function HomeScreen() {
@@ -583,11 +592,18 @@ export default function HomeScreen() {
               }}
               style={styles.linkButton}
             >
-              <Text style={styles.linkButtonText}>{showLearn ? "Hide beginner help" : "Show beginner help"}</Text>
+              <Text style={styles.linkButtonText}>
+                {showLearn ? "Hide beginner help" : "Show beginner help"}
+              </Text>
             </Pressable>
 
             <Pressable onPress={() => openUrl(`${API_BASE}/api/explain`)} style={styles.linkButton}>
               <Text style={styles.linkButtonText}>Open full explain (JSON)</Text>
+            </Pressable>
+
+            {/* NEW: Jump to News tab */}
+            <Pressable onPress={() => goToNews(tickers[0] || "SPY")} style={styles.linkButton}>
+              <Text style={styles.linkButtonText}>Open News</Text>
             </Pressable>
           </View>
 
@@ -597,7 +613,15 @@ export default function HomeScreen() {
 
         {/* Saved tickers */}
         <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Saved tickers</Text>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+            <Text style={styles.sectionTitle}>Saved tickers</Text>
+
+            {/* NEW: News for current ticker */}
+            <Pressable onPress={() => goToNews(tickers[0] || "SPY")} style={styles.linkButton}>
+              <Text style={styles.linkButtonText}>News</Text>
+            </Pressable>
+          </View>
+
           <Text style={styles.hint}>Tap to replace input. Long-press removes.</Text>
 
           <View style={styles.chipsWrap}>
@@ -625,7 +649,10 @@ export default function HomeScreen() {
               <Text style={styles.smallButtonText}>Save first ticker</Text>
             </Pressable>
 
-            <Pressable onPress={() => applyTickerCSV(DEFAULT_TICKERS.join(", "))} style={styles.smallButton}>
+            <Pressable
+              onPress={() => applyTickerCSV(DEFAULT_TICKERS.join(", "))}
+              style={styles.smallButton}
+            >
               <Text style={styles.smallButtonText}>Defaults</Text>
             </Pressable>
           </View>
@@ -684,7 +711,8 @@ export default function HomeScreen() {
                   <View style={styles.row}>
                     <Pressable
                       onPress={() => {
-                        const next: DirectionFilter = filter === "ALL" ? "UP" : filter === "UP" ? "DOWN" : "ALL";
+                        const next: DirectionFilter =
+                          filter === "ALL" ? "UP" : filter === "UP" ? "DOWN" : "ALL";
                         setFilter(next);
                         persist(STORAGE_KEYS.lastFilter, next);
                       }}
@@ -707,7 +735,12 @@ export default function HomeScreen() {
                       style={styles.smallButton}
                     >
                       <Text style={styles.smallButtonText}>
-                        Sort: {sortMode === "PROB_DESC" ? "Prob ↓" : sortMode === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}
+                        Sort:{" "}
+                        {sortMode === "PROB_DESC"
+                          ? "Prob ↓"
+                          : sortMode === "EXP_DESC"
+                          ? "Exp ↓"
+                          : "Ticker A–Z"}
                       </Text>
                     </Pressable>
 
@@ -722,6 +755,11 @@ export default function HomeScreen() {
                       style={styles.smallButton}
                     >
                       <Text style={styles.smallButtonText}>{showDebug ? "Hide Debug" : "Show Debug"}</Text>
+                    </Pressable>
+
+                    {/* NEW: News for the top ticker */}
+                    <Pressable onPress={() => goToNews(filteredSorted[0]?.ticker || tickers[0])} style={styles.smallButton}>
+                      <Text style={styles.smallButtonText}>News: {String(filteredSorted[0]?.ticker || tickers[0] || "SPY")}</Text>
                     </Pressable>
                   </View>
 
@@ -826,6 +864,11 @@ function ResultCard({ p, sourcePref }: { p: PredRow; sourcePref: SourcePref }) {
           style={styles.linkPill}
         >
           <Text style={styles.linkPillText}>Report card</Text>
+        </Pressable>
+
+        {/* NEW: News for this ticker */}
+        <Pressable onPress={() => goToNews(ticker)} style={styles.linkPill}>
+          <Text style={styles.linkPillText}>News</Text>
         </Pressable>
       </View>
 
@@ -965,24 +1008,4 @@ const styles = StyleSheet.create({
   resultProb: { color: "#E5E7EB", fontWeight: "800", marginLeft: "auto" },
   resultMeta: { color: "#A7B0C0", marginTop: 6 },
 
-  badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, borderWidth: 1 },
-  badgeUp: { backgroundColor: "#0F2A22", borderColor: "#1ED9A6" },
-  badgeDown: { backgroundColor: "#2A1416", borderColor: "#FF6B6B" },
-
-  badgeConfHigh: { backgroundColor: "#102A4A", borderColor: "#2E6BFF" },
-  badgeConfMed: { backgroundColor: "#2A2510", borderColor: "#FFD166" },
-  badgeConfLow: { backgroundColor: "#1B2A4A", borderColor: "#223256" },
-
-  badgeText: { color: "#FFFFFF", fontWeight: "900" },
-
-  jsonBox: {
-    marginTop: 10,
-    backgroundColor: "#0B1220",
-    borderColor: "#223256",
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-  },
-
-  debug: { marginTop: 14, color: "#93A4C7", fontSize: 12 },
-});
+  badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius:

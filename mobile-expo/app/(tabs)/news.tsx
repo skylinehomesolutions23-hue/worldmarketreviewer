@@ -554,7 +554,9 @@ export default function NewsTab() {
             <Text style={styles.buttonText}>{loading ? "Loading..." : "Fetch News"}</Text>
           </Pressable>
 
-          <Text style={styles.hint}>Defaults to English for cleaner headlines. Switch to All anytime.</Text>
+          <Text style={styles.hint}>
+            Defaults to English for cleaner headlines. Switch to All anytime.
+          </Text>
         </View>
 
         <View style={styles.resultsHeader}>
