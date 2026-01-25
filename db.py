@@ -5,88 +5,105 @@ from typing import Any, Dict, List, Optional, Tuple
 import psycopg2
 import psycopg2.extras
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+def _db_url() -> str:
+    # Always read fresh so Render env changes apply without code changes
+    return (os.getenv("DATABASE_URL") or "").strip()
 
 
-def _require_db_url():
-    if not DATABASE_URL:
+def _connect():
+    url = _db_url()
+    if not url:
         raise RuntimeError(
             "DATABASE_URL is not set. Add it to your environment (Render env vars / local env)."
         )
 
+    # Supabase needs SSL; allow override via env
+    sslmode = (os.getenv("PGSSLMODE") or "require").strip() or "require"
+    return psycopg2.connect(url, sslmode=sslmode)
 
-def _connect():
-    _require_db_url()
-    return psycopg2.connect(DATABASE_URL)
 
-
-def init_db():
+def init_db() -> Dict[str, Any]:
     """
     Create tables if they don't exist. Also adds new columns if missing.
+
+    IMPORTANT: This must NOT crash your entire API on Render if the DB is unreachable.
+    It returns {ok: bool, ...} so api.py can decide what to do.
     """
-    conn = _connect()
-    cur = conn.cursor()
+    url = _db_url()
+    if not url:
+        # In dev you might not have DB configured; do not crash
+        return {"ok": True, "skipped": True, "reason": "DATABASE_URL not set"}
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS predictions (
-        id BIGSERIAL PRIMARY KEY,
-        run_id TEXT NOT NULL,
-        ticker TEXT NOT NULL,
-        generated_at TEXT NOT NULL,
-        prob_up DOUBLE PRECISION,
-        exp_return DOUBLE PRECISION,
-        direction TEXT,
-        horizon_days INTEGER DEFAULT 5,
-        source TEXT,
+    try:
+        conn = _connect()
+        cur = conn.cursor()
 
-        -- scoring / verification fields
-        as_of_date TEXT,
-        as_of_close DOUBLE PRECISION,
-        realized_return DOUBLE PRECISION,
-        realized_direction TEXT,
-        scored_at TEXT
-    );
-    """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS predictions (
+            id BIGSERIAL PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            prob_up DOUBLE PRECISION,
+            exp_return DOUBLE PRECISION,
+            direction TEXT,
+            horizon_days INTEGER DEFAULT 5,
+            source TEXT,
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS run_state (
-        run_id TEXT PRIMARY KEY,
-        status TEXT NOT NULL,
-        total INTEGER NOT NULL,
-        completed INTEGER NOT NULL,
-        started_at TEXT NOT NULL,
-        finished_at TEXT
-    );
-    """)
+            -- scoring / verification fields
+            as_of_date TEXT,
+            as_of_close DOUBLE PRECISION,
+            realized_return DOUBLE PRECISION,
+            realized_direction TEXT,
+            scored_at TEXT
+        );
+        """)
 
-    # Add missing columns safely (older DBs)
-    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS source TEXT;")
-    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS horizon_days INTEGER DEFAULT 5;")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS run_state (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            total INTEGER NOT NULL,
+            completed INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT
+        );
+        """)
 
-    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS as_of_date TEXT;")
-    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS as_of_close DOUBLE PRECISION;")
-    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS realized_return DOUBLE PRECISION;")
-    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS realized_direction TEXT;")
-    cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS scored_at TEXT;")
+        # Add missing columns safely (older DBs)
+        cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS source TEXT;")
+        cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS horizon_days INTEGER DEFAULT 5;")
 
-    cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_predictions_run
-    ON predictions(run_id);
-    """)
+        cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS as_of_date TEXT;")
+        cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS as_of_close DOUBLE PRECISION;")
+        cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS realized_return DOUBLE PRECISION;")
+        cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS realized_direction TEXT;")
+        cur.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS scored_at TEXT;")
 
-    cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_predictions_ticker_time
-    ON predictions(ticker, generated_at);
-    """)
+        cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_predictions_run
+        ON predictions(run_id);
+        """)
 
-    cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_predictions_scoring
-    ON predictions(ticker, horizon_days, as_of_date);
-    """)
+        cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_predictions_ticker_time
+        ON predictions(ticker, generated_at);
+        """)
 
-    conn.commit()
-    cur.close()
-    conn.close()
+        cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_predictions_scoring
+        ON predictions(ticker, horizon_days, as_of_date);
+        """)
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {"ok": True, "skipped": False}
+    except Exception as e:
+        # DO NOT crash startup; just report it
+        return {"ok": False, "error": str(e)}
 
 
 def insert_predictions(run_id: str, rows: List[Dict[str, Any]]):
