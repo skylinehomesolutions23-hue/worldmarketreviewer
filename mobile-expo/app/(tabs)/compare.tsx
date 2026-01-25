@@ -1,3 +1,4 @@
+// app/(tabs)/compare.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -17,6 +18,7 @@ const STORAGE_KEYS = {
   savedTickers: "wmr:savedTickers:v3",
   lastTickersInput: "wmr:lastTickersInput:v3",
   lastHorizon: "wmr:lastHorizon:v3",
+  lastSourcePref: "wmr:lastSourcePref:v3",
 };
 
 type VerifyResponse = {
@@ -75,6 +77,7 @@ export default function CompareScreen() {
   const [savedTickers, setSavedTickers] = useState<string[]>(["SPY", "QQQ"]);
   const [ticker, setTicker] = useState<string>("SPY");
   const [horizonDays, setHorizonDays] = useState<number>(5);
+  const [sourcePref, setSourcePref] = useState<"auto" | "stooq" | "yahoo">("auto");
 
   const [loading, setLoading] = useState<boolean>(false);
   const [data, setData] = useState<VerifyResponse | null>(null);
@@ -83,10 +86,11 @@ export default function CompareScreen() {
   useEffect(() => {
     (async () => {
       try {
-        const [saved, lastInput, lastH] = await Promise.all([
+        const [saved, lastInput, lastH, sp] = await Promise.all([
           AsyncStorage.getItem(STORAGE_KEYS.savedTickers),
           AsyncStorage.getItem(STORAGE_KEYS.lastTickersInput),
           AsyncStorage.getItem(STORAGE_KEYS.lastHorizon),
+          AsyncStorage.getItem(STORAGE_KEYS.lastSourcePref),
         ]);
 
         if (saved) {
@@ -103,6 +107,9 @@ export default function CompareScreen() {
           const n = Number(lastH);
           if (Number.isFinite(n) && n > 0) setHorizonDays(n);
         }
+
+        const s = (sp || "auto").toString().toLowerCase();
+        if (s === "auto" || s === "stooq" || s === "yahoo") setSourcePref(s);
       } catch {
         // ignore
       }
@@ -116,9 +123,38 @@ export default function CompareScreen() {
     return base.slice(0, 18);
   }, [savedTickers]);
 
-  async function fetchVerify(tk?: string, h?: number) {
+  async function persistPrefs(nextH: number, nextSource: "auto" | "stooq" | "yahoo") {
+    try {
+      await Promise.all([
+        AsyncStorage.setItem(STORAGE_KEYS.lastHorizon, String(nextH)),
+        AsyncStorage.setItem(STORAGE_KEYS.lastSourcePref, nextSource),
+      ]);
+    } catch {
+      // ignore
+    }
+  }
+
+  function cycleHorizon() {
+    const next = horizonDays === 5 ? 10 : horizonDays === 10 ? 20 : 5;
+    setHorizonDays(next);
+    persistPrefs(next, sourcePref).catch(() => {});
+    // optional: re-fetch immediately so the screen reflects the new horizon
+    fetchVerify(ticker, next).catch(() => {});
+  }
+
+  function cycleSource() {
+    const next: "auto" | "stooq" | "yahoo" =
+      sourcePref === "auto" ? "stooq" : sourcePref === "stooq" ? "yahoo" : "auto";
+    setSourcePref(next);
+    persistPrefs(horizonDays, next).catch(() => {});
+    // optional: re-fetch immediately so the screen reflects the new source
+    fetchVerify(ticker, horizonDays, next).catch(() => {});
+  }
+
+  async function fetchVerify(tk?: string, h?: number, sp?: "auto" | "stooq" | "yahoo") {
     const t = (tk ?? ticker).trim().toUpperCase();
     const hd = h ?? horizonDays;
+    const source = sp ?? sourcePref;
     if (!t) return;
 
     setLoading(true);
@@ -128,7 +164,9 @@ export default function CompareScreen() {
     try {
       const url = `${API_BASE}/api/verify?ticker=${encodeURIComponent(
         t
-      )}&horizon_days=${encodeURIComponent(String(hd))}&n=90&lookback_days=240`;
+      )}&horizon_days=${encodeURIComponent(String(hd))}&n=90&lookback_days=240&source_pref=${encodeURIComponent(
+        source
+      )}`;
 
       const res = await fetch(url);
       const j = (await safeJson(res)) as VerifyResponse;
@@ -194,15 +232,12 @@ export default function CompareScreen() {
           />
 
           <View style={styles.row}>
-            <Pressable
-              onPress={() => {
-                const next = horizonDays === 5 ? 10 : horizonDays === 10 ? 20 : 5;
-                setHorizonDays(next);
-                AsyncStorage.setItem(STORAGE_KEYS.lastHorizon, String(next)).catch(() => {});
-              }}
-              style={styles.smallButton}
-            >
+            <Pressable onPress={cycleHorizon} style={styles.smallButton}>
               <Text style={styles.smallButtonText}>Horizon: {horizonDays}d</Text>
+            </Pressable>
+
+            <Pressable onPress={cycleSource} style={styles.smallButton}>
+              <Text style={styles.smallButtonText}>Source: {sourcePref}</Text>
             </Pressable>
 
             <Pressable onPress={() => fetchVerify()} style={styles.button}>
@@ -221,7 +256,7 @@ export default function CompareScreen() {
                 key={t}
                 onPress={() => {
                   setTicker(t);
-                  fetchVerify(t, horizonDays);
+                  fetchVerify(t, horizonDays).catch(() => {});
                 }}
                 style={styles.chip}
               >

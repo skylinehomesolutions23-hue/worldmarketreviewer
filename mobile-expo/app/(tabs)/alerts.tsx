@@ -162,6 +162,7 @@ export default function AlertsTab() {
     let p = parseFloat(minProbUp);
     if (!Number.isFinite(p)) p = 0.65;
     p = Math.max(0, Math.min(1, p));
+
     const tickers = uniq(
       tickersText
         .replace(/\s+/g, ",")
@@ -184,15 +185,20 @@ export default function AlertsTab() {
   }, []);
 
   async function createRule() {
-    const id = `${Date.now()}`;
+    if (parsed.tickers.length === 0) {
+      return Alert.alert("Add at least 1 ticker", "Example: SPY, QQQ, TSLA");
+    }
+
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const rule: Rule = {
       id,
       name: name.trim() || "Alert Rule",
       minProbUp: parsed.p,
       minConfidence: minConf,
-      tickers: parsed.tickers.length ? parsed.tickers : ["SPY", "QQQ", "TSLA"],
+      tickers: parsed.tickers,
       enabled: true,
     };
+
     const next = [rule, ...rules];
     setRules(next);
     await saveRules(next);
@@ -209,6 +215,13 @@ export default function AlertsTab() {
     const next = rules.filter((r) => r.id !== id);
     setRules(next);
     await saveRules(next);
+  }
+
+  function confirmDelete(id: string) {
+    Alert.alert("Delete rule?", "This cannot be undone.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: () => deleteRule(id) },
+    ]);
   }
 
   async function clearHistory() {
@@ -246,6 +259,10 @@ export default function AlertsTab() {
       const json = await res.json();
       const preds: Prediction[] = Array.isArray(json?.predictions) ? json.predictions : [];
 
+      // Faster lookup by ticker
+      const predMap = new Map<string, Prediction>();
+      for (const p of preds) predMap.set(toUpperTicker(p.ticker), p);
+
       const hits: Hit[] = [];
       const now = new Date().toLocaleString();
 
@@ -254,7 +271,7 @@ export default function AlertsTab() {
         const needConf = confRank(rule.minConfidence);
 
         for (const tk of rule.tickers) {
-          const p = preds.find((x) => (x.ticker || "").toUpperCase() === tk.toUpperCase());
+          const p = predMap.get(toUpperTicker(tk));
           const prob = p?.prob_up ?? null;
           const conf = (p?.confidence || "UNKNOWN").toUpperCase();
 
@@ -266,12 +283,12 @@ export default function AlertsTab() {
               time: now,
               ruleId: rule.id,
               ruleName: rule.name,
-              ticker: tk.toUpperTicker?.() ?? tk,
+              ticker: toUpperTicker(tk),
               prob_up: prob,
               confidence: conf,
               source: p?.source,
               as_of_date: p?.as_of_date ?? null,
-            } as any);
+            });
           }
         }
       }
@@ -282,10 +299,13 @@ export default function AlertsTab() {
         await saveHistory(nextHist);
 
         // For now: reliable device popup.
-        // Later: true push/email (Step 2b).
+        // Later: true push/email.
         Alert.alert(
           `Alerts triggered (${hits.length})`,
-          hits.slice(0, 6).map((h) => `${h.ticker} • ${fmtProb(h.prob_up)} • ${h.confidence}`).join("\n")
+          hits
+            .slice(0, 6)
+            .map((h) => `${h.ticker} • ${fmtProb(h.prob_up)} • ${h.confidence}`)
+            .join("\n")
         );
       } else {
         Alert.alert("No alerts triggered", "Nothing matched your rules this run.");
@@ -365,14 +385,23 @@ export default function AlertsTab() {
             <View key={r.id} style={styles.item}>
               <View style={styles.rowBetween}>
                 <Text style={styles.itemTitle}>{r.name}</Text>
-                <Pressable onPress={() => toggleRule(r.id)} style={[styles.badge, r.enabled ? styles.badgeOn : styles.badgeOff]}>
-                  <Text style={styles.badgeText}>{r.enabled ? "ON" : "OFF"}</Text>
+
+                <Pressable
+                  onPress={() => toggleRule(r.id)}
+                  style={[styles.badge, r.enabled ? styles.badgeOn : styles.badgeOff]}
+                >
+                  <Text style={[styles.badgeText, !r.enabled && styles.badgeTextOff]}>
+                    {r.enabled ? "ON" : "OFF"}
+                  </Text>
                 </Pressable>
               </View>
+
               <Text style={styles.itemMeta}>
-                prob_up ≥ {r.minProbUp.toFixed(2)} • conf ≥ {r.minConfidence} • tickers: {r.tickers.join(", ")}
+                prob_up ≥ {r.minProbUp.toFixed(2)} • conf ≥ {r.minConfidence} • tickers:{" "}
+                {r.tickers.join(", ")}
               </Text>
-              <Pressable onPress={() => deleteRule(r.id)} style={styles.deleteBtn}>
+
+              <Pressable onPress={() => confirmDelete(r.id)} style={styles.deleteBtn}>
                 <Text style={styles.deleteText}>Delete</Text>
               </Pressable>
             </View>
@@ -488,7 +517,9 @@ const styles = StyleSheet.create({
   },
   badgeOn: { backgroundColor: "#111" },
   badgeOff: { backgroundColor: "#ddd" },
+
   badgeText: { color: "white", fontWeight: "900", fontSize: 12 },
+  badgeTextOff: { color: "#111" },
 
   deleteBtn: { alignSelf: "flex-start", marginTop: 4 },
   deleteText: { color: "#a40000", fontWeight: "900" },

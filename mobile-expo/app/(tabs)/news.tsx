@@ -168,7 +168,7 @@ export default function NewsTab() {
   const [limit, setLimit] = useState<string>("10");
   const [hoursBack, setHoursBack] = useState<string>("72");
 
-  // Default to English (feels pro). User can switch to All.
+  // Default to English (cleaner headlines). User can switch to All.
   const [selectedLanguage, setSelectedLanguage] = useState<string>("English");
   const [selectedCountry, setSelectedCountry] = useState<string>("ALL");
 
@@ -258,7 +258,7 @@ export default function NewsTab() {
       if (lim) setLimit(String(lim));
       if (hb) setHoursBack(String(hb));
 
-      // If unset, default stays English
+      // If unset, defaults remain English + ALL
       if (lang) setSelectedLanguage(lang);
       if (country) setSelectedCountry(country);
     } catch {}
@@ -417,7 +417,7 @@ export default function NewsTab() {
     const next = (savedTickers || []).filter((x) => toUpperTicker(x) !== up);
     try {
       await saveTickersToKey(savedTickersKey, next);
-      if (next.length) setSavedTickers(next);
+      setSavedTickers(next);
     } catch {
       Alert.alert("Error", "Couldn't update tickers.");
     }
@@ -554,9 +554,7 @@ export default function NewsTab() {
             <Text style={styles.buttonText}>{loading ? "Loading..." : "Fetch News"}</Text>
           </Pressable>
 
-          <Text style={styles.hint}>
-            Defaults to English for cleaner headlines. Switch to All anytime.
-          </Text>
+          <Text style={styles.hint}>Defaults to English for cleaner headlines. Switch to All anytime.</Text>
         </View>
 
         <View style={styles.resultsHeader}>
@@ -582,11 +580,7 @@ export default function NewsTab() {
               </Text>
 
               {filteredItems.map((it, idx) => (
-                <Pressable
-                  key={`${it.url}-${idx}`}
-                  style={styles.item}
-                  onPress={() => openUrl(it.url)}
-                >
+                <Pressable key={`${it.url}-${idx}`} style={styles.item} onPress={() => openUrl(it.url)}>
                   <Text style={styles.itemTitle} numberOfLines={3}>
                     {it.title}
                   </Text>
@@ -607,9 +601,7 @@ export default function NewsTab() {
           <View style={styles.errorBox}>
             <Text style={styles.errorTitle}>Error: {resp.error || "Unknown error"}</Text>
             {resp.note ? <Text style={styles.errorText}>{resp.note}</Text> : null}
-            {resp.content_type ? (
-              <Text style={styles.errorText}>content-type: {resp.content_type}</Text>
-            ) : null}
+            {resp.content_type ? <Text style={styles.errorText}>content-type: {resp.content_type}</Text> : null}
             {resp.url ? <Text style={styles.errorText}>url: {resp.url}</Text> : null}
             {resp.body_preview ? (
               <Text style={styles.errorText} numberOfLines={6}>

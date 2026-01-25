@@ -1,3 +1,4 @@
+// app/(tabs)/watchlist.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -20,6 +21,9 @@ const STORAGE_KEYS = {
     "wmr:savedTickers:v1",
     "savedTickers",
   ],
+  // Keep user prefs consistent across tabs
+  lastHorizon: "wmr:lastHorizon:v3",
+  lastSourcePref: "wmr:lastSourcePref:v3",
 };
 
 type Prediction = {
@@ -76,6 +80,7 @@ async function loadSavedTickers(): Promise<string[]> {
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean);
+
         const cleaned = uniq(parts);
         if (cleaned.length) return cleaned;
       }
@@ -101,19 +106,65 @@ function fmtProb(x?: number | null) {
   return `${(n * 100).toFixed(0)}%`;
 }
 
+async function safeJson(res: Response) {
+  const txt = await res.text();
+  try {
+    return JSON.parse(txt);
+  } catch {
+    return { raw: txt };
+  }
+}
+
 export default function WatchlistTab() {
   const [tickers, setTickers] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [preds, setPreds] = useState<Prediction[]>([]);
   const [lastUpdated, setLastUpdated] = useState<string>("");
 
-  const top10 = useMemo(() => (tickers.length ? tickers.slice(0, 10) : []), [tickers]);
+  // keep horizon/source in sync with the rest of the app
+  const [horizonDays, setHorizonDays] = useState<number>(5);
+  const [sourcePref, setSourcePref] = useState<"auto" | "stooq" | "yahoo">("auto");
+
+  const top10 = useMemo(
+    () => (tickers.length ? tickers.slice(0, 10) : []),
+    [tickers]
+  );
 
   useEffect(() => {
     loadSavedTickers()
       .then((t) => setTickers(t))
       .catch(() => setTickers(["SPY", "QQQ", "TSLA"]));
+
+    (async () => {
+      try {
+        const [h, sp] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_KEYS.lastHorizon),
+          AsyncStorage.getItem(STORAGE_KEYS.lastSourcePref),
+        ]);
+
+        const hn = Number(h);
+        if (Number.isFinite(hn) && hn > 0) setHorizonDays(hn);
+
+        const s = (sp || "auto").toString().toLowerCase();
+        if (s === "stooq" || s === "yahoo" || s === "auto") {
+          setSourcePref(s);
+        }
+      } catch {
+        // ignore
+      }
+    })();
   }, []);
+
+  async function persistPrefs(nextH: number, nextSource: "auto" | "stooq" | "yahoo") {
+    try {
+      await Promise.all([
+        AsyncStorage.setItem(STORAGE_KEYS.lastHorizon, String(nextH)),
+        AsyncStorage.setItem(STORAGE_KEYS.lastSourcePref, nextSource),
+      ]);
+    } catch {
+      // ignore
+    }
+  }
 
   async function runPredictions() {
     const list = top10.length ? top10 : ["SPY", "QQQ", "TSLA"];
@@ -127,17 +178,24 @@ export default function WatchlistTab() {
         body: JSON.stringify({
           tickers: list,
           retrain: false,
-          horizon_days: 5,
+          horizon_days: horizonDays,
           base_weekly_move: 0.02,
           max_parallel: 4,
-          source_pref: "auto",
+          source_pref: sourcePref,
         }),
       });
 
-      const json = await res.json();
+      const json = (await safeJson(res)) as any;
+
+      if (!res.ok) {
+        const msg = `HTTP ${res.status}: ${JSON.stringify(json).slice(0, 300)}`;
+        Alert.alert("Watchlist error", msg);
+        return;
+      }
+
       const got: Prediction[] = Array.isArray(json?.predictions) ? json.predictions : [];
 
-      // Sort: highest confidence first, then highest prob_up for UP
+      // Sort: highest confidence first, then highest prob_up
       got.sort((a, b) => {
         const ar = (a.confidence_score ?? 0) - (b.confidence_score ?? 0);
         if (ar !== 0) return -ar;
@@ -155,9 +213,20 @@ export default function WatchlistTab() {
 
   function openNews(t: string) {
     const tk = toUpperTicker(t);
-    // NOTE: News tab might not accept params yet — that’s OK for now.
-    // Next step (News tab) we’ll make it auto-fill ticker from params.
-    router.push({ pathname: "/news", params: { ticker: tk } });
+    router.push({ pathname: "/(tabs)/news", params: { ticker: tk } });
+  }
+
+  function cycleHorizon() {
+    const next = horizonDays === 5 ? 10 : horizonDays === 10 ? 20 : 5;
+    setHorizonDays(next);
+    persistPrefs(next, sourcePref).catch(() => {});
+  }
+
+  function cycleSource() {
+    const next: "auto" | "stooq" | "yahoo" =
+      sourcePref === "auto" ? "stooq" : sourcePref === "stooq" ? "yahoo" : "auto";
+    setSourcePref(next);
+    persistPrefs(horizonDays, next).catch(() => {});
   }
 
   return (
@@ -166,7 +235,19 @@ export default function WatchlistTab() {
       <Text style={styles.sub}>Tracks your saved tickers (max 10).</Text>
 
       <View style={styles.card}>
-        <Text style={styles.label}>Tracked</Text>
+        <View style={styles.rowBetween}>
+          <Text style={styles.label}>Tracked</Text>
+
+          <View style={styles.rowRight}>
+            <Pressable style={styles.pillBtn} onPress={cycleHorizon}>
+              <Text style={styles.pillText}>Horizon: {horizonDays}d</Text>
+            </Pressable>
+
+            <Pressable style={styles.pillBtn} onPress={cycleSource}>
+              <Text style={styles.pillText}>Source: {sourcePref}</Text>
+            </Pressable>
+          </View>
+        </View>
 
         <View style={styles.chips}>
           {(top10.length ? top10 : ["SPY", "QQQ", "TSLA"]).map((t) => (
@@ -241,6 +322,9 @@ const styles = StyleSheet.create({
     backgroundColor: "white",
   },
 
+  rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  rowRight: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" },
+
   label: { fontSize: 12, color: "#666", marginBottom: 6 },
 
   chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
@@ -253,6 +337,16 @@ const styles = StyleSheet.create({
     backgroundColor: "white",
   },
   chipText: { fontWeight: "800", color: "#111", fontSize: 12 },
+
+  pillBtn: {
+    borderWidth: 1,
+    borderColor: "#111",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "white",
+  },
+  pillText: { fontWeight: "900", color: "#111", fontSize: 12 },
 
   button: {
     backgroundColor: "#111",
