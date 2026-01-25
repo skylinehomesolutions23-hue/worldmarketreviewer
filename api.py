@@ -546,9 +546,21 @@ def _startup():
         print("[startup] DATABASE_URL not set; skipping init_db/init_alerts_db (local dev).")
         return
 
-    init_db()
-    init_alerts_db()
+    # ---- main DB (predictions, run_state) ----
+    try:
+        r = init_db()
+        if isinstance(r, dict) and not r.get("ok", True):
+            print("[startup][WARN] init_db failed, app will continue:", r.get("error"))
+    except Exception as e:
+        print("[startup][WARN] init_db exception, app will continue:", str(e))
 
+    # ---- alerts DB ----
+    try:
+        r2 = init_alerts_db()
+        if isinstance(r2, dict) and not r2.get("ok", True):
+            print("[startup][WARN] init_alerts_db failed, app will continue:", r2.get("error"))
+    except Exception as e:
+        print("[startup][WARN] init_alerts_db exception, app will continue:", str(e))
 
 
 
