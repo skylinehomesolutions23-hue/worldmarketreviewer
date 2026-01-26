@@ -1008,4 +1008,10 @@ const styles = StyleSheet.create({
   resultProb: { color: "#E5E7EB", fontWeight: "800", marginLeft: "auto" },
   resultMeta: { color: "#A7B0C0", marginTop: 6 },
 
-  badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius:
+   badge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: "#111",
+  },
+});
