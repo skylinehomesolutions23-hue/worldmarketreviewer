@@ -1,3 +1,4 @@
+# alerts_router.py
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -67,7 +68,6 @@ def _db_info_safe() -> Dict[str, Any]:
 
     try:
         u = urlparse(raw_stripped)
-        # u.path is like "/postgres"
         dbname = (u.path or "").lstrip("/")
         info.update(
             {
@@ -139,6 +139,28 @@ def subscription(email: str):
         return {"ok": False, "error": "Not found"}
     sub["tickers_list"] = _parse_tickers(sub.get("tickers"))
     return {"ok": True, "subscription": sub}
+
+
+# ✅ NEW: list subscriptions for the UI
+# Note: your mobile calls /api/alerts/subscriptions?limit=200
+# This returns {"items":[...]} as your app expects.
+@router.get("/subscriptions")
+def subscriptions(limit: int = 200) -> Dict[str, Any]:
+    init_alerts_db()
+
+    limit = max(1, min(2000, int(limit)))
+
+    # This function name suggests enabled-only; that matches your earlier SQL.
+    rows = list_enabled_subscriptions(limit=limit) or []
+
+    # Add tickers_list for client convenience
+    for r in rows:
+        try:
+            r["tickers_list"] = _parse_tickers(r.get("tickers"))
+        except Exception:
+            r["tickers_list"] = []
+
+    return {"ok": True, "returned": len(rows), "items": rows}
 
 
 @router.get("/events")
@@ -261,3 +283,16 @@ def run_all(
         "results_sample": results[:25],
         "note": "Use Render Cron to call /api/alerts/run?key=... on a schedule.",
     }
+
+@router.get("/subscriptions")
+def subscriptions(limit: int = 200) -> Dict[str, Any]:
+    init_alerts_db()
+
+    limit = max(1, min(2000, int(limit)))
+    rows = list_enabled_subscriptions(limit=limit) or []
+
+    # add tickers_list for mobile convenience
+    for r in rows:
+        r["tickers_list"] = _parse_tickers(r.get("tickers"))
+
+    return {"ok": True, "returned": len(rows), "items": rows}

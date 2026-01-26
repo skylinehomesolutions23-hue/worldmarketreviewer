@@ -19,6 +19,8 @@ from walk_forward import walk_forward_predict_proba
 
 from alerts_db import init_alerts_db
 from alerts_router import router as alerts_router
+    app.include_router(alerts_router)
+
 
 from db import (
     init_db,
