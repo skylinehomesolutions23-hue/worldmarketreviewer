@@ -1,12 +1,12 @@
 import math
+import os
 from datetime import datetime
-from typing import List, Optional, Dict, Any, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote_plus
 
 import httpx
-import os
 from fastapi import FastAPI
 from fastapi.responses import Response, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,11 +16,6 @@ from main_autobatch import TICKERS
 from data_loader import load_stock_data
 from feature_engineering import build_features
 from walk_forward import walk_forward_predict_proba
-
-from alerts_db import init_alerts_db
-from alerts_router import router as alerts_router
-app.include_router(alerts_router)
-
 
 from db import (
     init_db,
@@ -36,6 +31,21 @@ from db import (
     set_prediction_score,
     get_scoreboard,
 )
+
+from alerts_db import init_alerts_db
+from alerts_router import router as alerts_router
+
+# ----------------------------
+# FastAPI app setup
+# ----------------------------
+app = FastAPI()
+
+# Initialize DB tables (safe to call multiple times)
+init_db()
+init_alerts_db()
+
+# Register alerts routes (/api/alerts/...)
+app.include_router(alerts_router)
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
