@@ -1,5 +1,7 @@
+// mobile-expo/app/(tabs)/alerts.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Pressable,
   ScrollView,
@@ -7,61 +9,61 @@ import {
   Text,
   TextInput,
   View,
-  ActivityIndicator,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
 const STORAGE_KEYS = {
-  rules: "wmr:alerts:rules:v1",
-  history: "wmr:alerts:history:v1",
-  savedTickersCandidates: [
-    "wmr:savedTickers:v3",
-    "wmr:savedTickers:v2",
-    "wmr:savedTickers:v1",
-    "savedTickers",
-  ],
+  savedTickers: "wmr:savedTickers:v3",
+  lastEmail: "wmr:alerts:lastEmail:v1",
+  lastTickers: "wmr:alerts:lastTickers:v1",
+  lastMinConfidence: "wmr:alerts:lastMinConfidence:v1",
+  lastMinProbUp: "wmr:alerts:lastMinProbUp:v1",
+  lastHorizon: "wmr:alerts:lastHorizon:v1",
+  // NEW: local hint so we don't nag repeatedly
+  warnedNoSubsEndpoint: "wmr:alerts:warnedNoSubsEndpoint:v1",
 };
 
-type Rule = {
-  id: string;
-  name: string;
-  minProbUp: number; // 0..1
-  minConfidence: "LOW" | "MEDIUM" | "HIGH";
-  tickers: string[]; // max 10
-  enabled: boolean;
+type SubscribeRequest = {
+  email: string;
+  tickers: string[];
+  min_confidence?: "LOW" | "MEDIUM" | "HIGH";
+  min_prob_up?: number;
+  horizon_days?: number;
 };
 
-type Hit = {
-  time: string;
-  ruleId: string;
-  ruleName: string;
-  ticker: string;
-  prob_up: number | null;
-  confidence: string;
-  source?: string;
-  as_of_date?: string | null;
-};
-
-type Prediction = {
-  ticker: string;
-  prob_up?: number | null;
-  confidence?: string;
-  source?: string;
-  as_of_date?: string | null;
+type SubscriptionRow = {
+  id?: string | number;
+  email?: string;
+  tickers?: string[];
+  min_confidence?: string;
+  min_prob_up?: number;
+  horizon_days?: number;
+  created_at?: string;
+  updated_at?: string;
+  enabled?: boolean;
+  [k: string]: any;
 };
 
 function toUpperTicker(s: string) {
-  return (s || "").toUpperCase().replace(/[^A-Z0-9.\-]/g, "").trim();
+  return (s || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9.\-]/g, "")
+    .trim();
 }
 
-function uniq(arr: string[]) {
+function normalizeTickers(input: string): string[] {
+  const parts = (input || "")
+    .replace(/\s+/g, ",")
+    .split(",")
+    .map((x) => toUpperTicker(x))
+    .filter(Boolean);
+
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const x of arr) {
-    const t = toUpperTicker(x);
-    if (t && !seen.has(t)) {
+  for (const t of parts) {
+    if (!seen.has(t)) {
       seen.add(t);
       out.push(t);
     }
@@ -69,249 +71,180 @@ function uniq(arr: string[]) {
   return out;
 }
 
-function confRank(c: string) {
-  const x = (c || "").toUpperCase().trim();
-  if (x === "HIGH") return 3;
-  if (x === "MEDIUM") return 2;
-  if (x === "LOW") return 1;
-  return 0;
+function clamp01(x: any): number | null {
+  const n = typeof x === "number" ? x : Number(x);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(1, n));
 }
 
-function fmtProb(x?: number | null) {
-  if (x === null || x === undefined) return "—";
-  const n = Number(x);
-  if (!Number.isFinite(n)) return "—";
-  return `${(n * 100).toFixed(0)}%`;
+function fmtPct01(x: any, digits = 0) {
+  const n = clamp01(x);
+  if (n == null) return "—";
+  return `${(n * 100).toFixed(digits)}%`;
 }
 
-async function loadSavedTickers(): Promise<string[]> {
-  for (const key of STORAGE_KEYS.savedTickersCandidates) {
-    try {
-      const raw = await AsyncStorage.getItem(key);
-      if (!raw) continue;
-
-      let vals: any = null;
-      try {
-        vals = JSON.parse(raw);
-      } catch {
-        vals = raw;
-      }
-
-      if (Array.isArray(vals)) {
-        const cleaned = uniq(vals.map(String));
-        if (cleaned.length) return cleaned;
-      }
-
-      if (typeof vals === "string") {
-        const cleaned = uniq(
-          vals
-            .replace(/\s+/g, ",")
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean)
-        );
-        if (cleaned.length) return cleaned;
-      }
-    } catch {}
-  }
-  return ["SPY", "QQQ", "TSLA", "NVDA", "AAPL"];
+function isEmailLike(s: string) {
+  const x = (s || "").trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x);
 }
 
-async function loadRules(): Promise<Rule[]> {
-  const raw = await AsyncStorage.getItem(STORAGE_KEYS.rules);
-  if (!raw) return [];
+async function safeJson(res: Response) {
+  const txt = await res.text();
   try {
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
+    return JSON.parse(txt);
   } catch {
-    return [];
+    return { raw: txt };
   }
-}
-
-async function saveRules(rules: Rule[]) {
-  await AsyncStorage.setItem(STORAGE_KEYS.rules, JSON.stringify(rules));
-}
-
-async function loadHistory(): Promise<Hit[]> {
-  const raw = await AsyncStorage.getItem(STORAGE_KEYS.history);
-  if (!raw) return [];
-  try {
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
-}
-
-async function saveHistory(items: Hit[]) {
-  await AsyncStorage.setItem(STORAGE_KEYS.history, JSON.stringify(items.slice(0, 200)));
 }
 
 export default function AlertsTab() {
-  const [rules, setRules] = useState<Rule[]>([]);
-  const [history, setHistory] = useState<Hit[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  // Create rule form
-  const [name, setName] = useState("High edge");
+  const [email, setEmail] = useState("");
+  const [tickersText, setTickersText] = useState("SPY,QQQ");
+  const [minConfidence, setMinConfidence] = useState<"LOW" | "MEDIUM" | "HIGH">("HIGH");
   const [minProbUp, setMinProbUp] = useState("0.65");
-  const [minConf, setMinConf] = useState<"LOW" | "MEDIUM" | "HIGH">("MEDIUM");
-  const [tickersText, setTickersText] = useState("SPY,QQQ,TSLA,NVDA,AAPL");
+  const [horizonDays, setHorizonDays] = useState("5");
+
+  const [loading, setLoading] = useState(false);
+  const [subsLoading, setSubsLoading] = useState(false);
+  const [subs, setSubs] = useState<SubscriptionRow[]>([]);
 
   const parsed = useMemo(() => {
-    let p = parseFloat(minProbUp);
+    const tickers = normalizeTickers(tickersText).slice(0, 25);
+
+    let p = Number(minProbUp);
     if (!Number.isFinite(p)) p = 0.65;
     p = Math.max(0, Math.min(1, p));
 
-    const tickers = uniq(
-      tickersText
-        .replace(/\s+/g, ",")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-    ).slice(0, 10);
+    let h = parseInt(horizonDays, 10);
+    if (!Number.isFinite(h)) h = 5;
+    h = Math.max(1, Math.min(60, h));
 
-    return { p, tickers };
-  }, [minProbUp, tickersText]);
+    return { tickers, min_prob_up: p, horizon_days: h };
+  }, [tickersText, minProbUp, horizonDays]);
 
   useEffect(() => {
     (async () => {
-      const [r, h, saved] = await Promise.all([loadRules(), loadHistory(), loadSavedTickers()]);
-      setRules(r);
-      setHistory(h);
-      if (!tickersText.trim()) setTickersText(saved.join(","));
-    })().catch(() => {});
+      try {
+        const [savedTickers, lastEmail, lastTickers, lastConf, lastProb, lastH] =
+          await Promise.all([
+            AsyncStorage.getItem(STORAGE_KEYS.savedTickers),
+            AsyncStorage.getItem(STORAGE_KEYS.lastEmail),
+            AsyncStorage.getItem(STORAGE_KEYS.lastTickers),
+            AsyncStorage.getItem(STORAGE_KEYS.lastMinConfidence),
+            AsyncStorage.getItem(STORAGE_KEYS.lastMinProbUp),
+            AsyncStorage.getItem(STORAGE_KEYS.lastHorizon),
+          ]);
+
+        if (lastEmail) setEmail(String(lastEmail));
+        if (lastTickers) setTickersText(String(lastTickers));
+
+        if (!lastTickers && savedTickers) {
+          try {
+            const arr = JSON.parse(savedTickers);
+            if (Array.isArray(arr) && arr.length) {
+              setTickersText(arr.map(String).slice(0, 10).join(","));
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        const c = String(lastConf || "").toUpperCase();
+        if (c === "LOW" || c === "MEDIUM" || c === "HIGH") setMinConfidence(c as any);
+
+        if (lastProb) setMinProbUp(String(lastProb));
+        if (lastH) setHorizonDays(String(lastH));
+      } catch {
+        // ignore
+      } finally {
+        // Do not auto-fetch subscriptions from backend because endpoint isn't deployed.
+        refreshSubscriptions().catch(() => {});
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function createRule() {
+  async function persistPrefs() {
+    try {
+      await Promise.all([
+        AsyncStorage.setItem(STORAGE_KEYS.lastEmail, email.trim()),
+        AsyncStorage.setItem(STORAGE_KEYS.lastTickers, tickersText),
+        AsyncStorage.setItem(STORAGE_KEYS.lastMinConfidence, minConfidence),
+        AsyncStorage.setItem(STORAGE_KEYS.lastMinProbUp, String(parsed.min_prob_up)),
+        AsyncStorage.setItem(STORAGE_KEYS.lastHorizon, String(parsed.horizon_days)),
+      ]);
+    } catch {
+      // ignore
+    }
+  }
+
+  // ✅ SAFE: backend list endpoint not deployed yet, so do NOT fetch it.
+  async function refreshSubscriptions() {
+    setSubsLoading(true);
+    try {
+      setSubs([]);
+
+      // One-time helpful hint (optional)
+      const warned = await AsyncStorage.getItem(STORAGE_KEYS.warnedNoSubsEndpoint);
+      if (!warned) {
+        await AsyncStorage.setItem(STORAGE_KEYS.warnedNoSubsEndpoint, "1");
+        // Keep it quiet by default. Uncomment if you want a one-time popup.
+        // Alert.alert(
+        //   "Subscriptions list",
+        //   "Your backend doesn't have GET /api/alerts/subscriptions yet, so the app can't show the subscription list."
+        // );
+      }
+    } finally {
+      setSubsLoading(false);
+    }
+  }
+
+  async function subscribe() {
+    const em = email.trim();
+    if (!isEmailLike(em)) return Alert.alert("Enter a valid email", "Example: you@email.com");
+
     if (parsed.tickers.length === 0) {
-      return Alert.alert("Add at least 1 ticker", "Example: SPY, QQQ, TSLA");
-    }
-
-    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const rule: Rule = {
-      id,
-      name: name.trim() || "Alert Rule",
-      minProbUp: parsed.p,
-      minConfidence: minConf,
-      tickers: parsed.tickers,
-      enabled: true,
-    };
-
-    const next = [rule, ...rules];
-    setRules(next);
-    await saveRules(next);
-    Alert.alert("Saved", "Rule created.");
-  }
-
-  async function toggleRule(id: string) {
-    const next = rules.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r));
-    setRules(next);
-    await saveRules(next);
-  }
-
-  async function deleteRule(id: string) {
-    const next = rules.filter((r) => r.id !== id);
-    setRules(next);
-    await saveRules(next);
-  }
-
-  function confirmDelete(id: string) {
-    Alert.alert("Delete rule?", "This cannot be undone.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: () => deleteRule(id) },
-    ]);
-  }
-
-  async function clearHistory() {
-    setHistory([]);
-    await saveHistory([]);
-  }
-
-  async function runCheckNow() {
-    const active = rules.filter((r) => r.enabled);
-    if (active.length === 0) {
-      return Alert.alert("No enabled rules", "Create a rule or enable one first.");
-    }
-
-    // Union tickers across active rules
-    const allTickers = uniq(active.flatMap((r) => r.tickers)).slice(0, 10);
-    if (allTickers.length === 0) {
-      return Alert.alert("No tickers", "Add tickers to at least one enabled rule.");
+      return Alert.alert("Add at least 1 ticker", "Example: SPY, QQQ, NVDA");
     }
 
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/summary`, {
+      await persistPrefs();
+
+      const body: SubscribeRequest = {
+        email: em,
+        tickers: parsed.tickers,
+        min_confidence: minConfidence,
+        min_prob_up: parsed.min_prob_up,
+        horizon_days: parsed.horizon_days,
+      };
+
+      const res = await fetch(`${API_BASE}/api/alerts/subscribe`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tickers: allTickers,
-          retrain: false,
-          horizon_days: 5,
-          base_weekly_move: 0.02,
-          max_parallel: 4,
-          source_pref: "auto",
-        }),
+        body: JSON.stringify(body),
       });
 
-      const json = await res.json();
-      const preds: Prediction[] = Array.isArray(json?.predictions) ? json.predictions : [];
+      const j = await safeJson(res);
 
-      // Faster lookup by ticker
-      const predMap = new Map<string, Prediction>();
-      for (const p of preds) predMap.set(toUpperTicker(p.ticker), p);
-
-      const hits: Hit[] = [];
-      const now = new Date().toLocaleString();
-
-      for (const rule of active) {
-        const needProb = rule.minProbUp;
-        const needConf = confRank(rule.minConfidence);
-
-        for (const tk of rule.tickers) {
-          const p = predMap.get(toUpperTicker(tk));
-          const prob = p?.prob_up ?? null;
-          const conf = (p?.confidence || "UNKNOWN").toUpperCase();
-
-          const probOk = prob !== null && Number.isFinite(prob) && prob >= needProb;
-          const confOk = confRank(conf) >= needConf;
-
-          if (probOk && confOk) {
-            hits.push({
-              time: now,
-              ruleId: rule.id,
-              ruleName: rule.name,
-              ticker: toUpperTicker(tk),
-              prob_up: prob,
-              confidence: conf,
-              source: p?.source,
-              as_of_date: p?.as_of_date ?? null,
-            });
-          }
-        }
+      if (!res.ok) {
+        const msg = `HTTP ${res.status}: ${JSON.stringify(j).slice(0, 600)}`;
+        Alert.alert("Subscribe failed", msg);
+        return;
       }
 
-      if (hits.length) {
-        const nextHist = [...hits, ...history].slice(0, 200);
-        setHistory(nextHist);
-        await saveHistory(nextHist);
+      Alert.alert(
+        "Subscribed",
+        `Email: ${em}\nTickers: ${parsed.tickers.join(", ")}\nMin conf: ${minConfidence}\nMin prob_up: ${fmtPct01(
+          parsed.min_prob_up,
+          0
+        )}\nHorizon: ${parsed.horizon_days}d`
+      );
 
-        // For now: reliable device popup.
-        // Later: true push/email.
-        Alert.alert(
-          `Alerts triggered (${hits.length})`,
-          hits
-            .slice(0, 6)
-            .map((h) => `${h.ticker} • ${fmtProb(h.prob_up)} • ${h.confidence}`)
-            .join("\n")
-        );
-      } else {
-        Alert.alert("No alerts triggered", "Nothing matched your rules this run.");
-      }
+      // Keep UI stable (no backend list endpoint)
+      await refreshSubscriptions();
     } catch (e: any) {
-      Alert.alert("Alert check failed", e?.message || "Request failed");
+      Alert.alert("Network error", String(e?.message || e));
     } finally {
       setLoading(false);
     }
@@ -320,113 +253,111 @@ export default function AlertsTab() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Alerts</Text>
-      <Text style={styles.sub}>Create rules and run checks during your testing phase.</Text>
+      <Text style={styles.sub}>
+        Subscribe to email alerts from the backend. (Subscription list UI is disabled until the backend list endpoint
+        exists.)
+      </Text>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Create a rule</Text>
+          <Text style={styles.cardTitle}>Create / Update Subscription</Text>
 
-          <Text style={styles.label}>Name</Text>
-          <TextInput value={name} onChangeText={setName} style={styles.input} placeholder="High edge" />
-
-          <Text style={styles.label}>Min prob_up (0–1)</Text>
+          <Text style={styles.label}>Email</Text>
           <TextInput
-            value={minProbUp}
-            onChangeText={setMinProbUp}
+            value={email}
+            onChangeText={setEmail}
             style={styles.input}
-            placeholder="0.65"
-            keyboardType="decimal-pad"
+            placeholder="you@email.com"
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="email-address"
+          />
+
+          <Text style={styles.label}>Tickers (comma or space separated)</Text>
+          <TextInput
+            value={tickersText}
+            onChangeText={setTickersText}
+            style={styles.input}
+            placeholder="SPY, QQQ, NVDA"
+            autoCapitalize="characters"
+            autoCorrect={false}
           />
 
           <Text style={styles.label}>Min confidence</Text>
           <View style={styles.chips}>
             {(["LOW", "MEDIUM", "HIGH"] as const).map((c) => {
-              const active = c === minConf;
+              const on = c === minConfidence;
               return (
                 <Pressable
                   key={c}
-                  onPress={() => setMinConf(c)}
-                  style={[styles.chip, active && styles.chipActive]}
+                  onPress={() => setMinConfidence(c)}
+                  style={[styles.chip, on && styles.chipActive]}
                 >
-                  <Text style={[styles.chipText, active && styles.chipTextActive]}>{c}</Text>
+                  <Text style={[styles.chipText, on && styles.chipTextActive]}>{c}</Text>
                 </Pressable>
               );
             })}
           </View>
 
-          <Text style={styles.label}>Tickers (max 10)</Text>
-          <TextInput
-            value={tickersText}
-            onChangeText={setTickersText}
-            style={styles.input}
-            placeholder="SPY,QQQ,TSLA,NVDA"
-            autoCapitalize="characters"
-            autoCorrect={false}
-          />
-
-          <Pressable style={styles.button} onPress={createRule}>
-            <Text style={styles.buttonText}>Save Rule</Text>
-          </Pressable>
-        </View>
-
-        <View style={styles.rowBetween}>
-          <Text style={styles.sectionTitle}>Your rules</Text>
-          <Pressable style={styles.outlineBtn} onPress={runCheckNow} disabled={loading}>
-            <Text style={styles.outlineBtnText}>{loading ? "Checking..." : "Run Check Now"}</Text>
-          </Pressable>
-        </View>
-
-        {loading ? <ActivityIndicator /> : null}
-
-        {rules.length === 0 ? (
-          <Text style={styles.muted}>No rules yet. Create one above.</Text>
-        ) : (
-          rules.map((r) => (
-            <View key={r.id} style={styles.item}>
-              <View style={styles.rowBetween}>
-                <Text style={styles.itemTitle}>{r.name}</Text>
-
-                <Pressable
-                  onPress={() => toggleRule(r.id)}
-                  style={[styles.badge, r.enabled ? styles.badgeOn : styles.badgeOff]}
-                >
-                  <Text style={[styles.badgeText, !r.enabled && styles.badgeTextOff]}>
-                    {r.enabled ? "ON" : "OFF"}
-                  </Text>
-                </Pressable>
-              </View>
-
-              <Text style={styles.itemMeta}>
-                prob_up ≥ {r.minProbUp.toFixed(2)} • conf ≥ {r.minConfidence} • tickers:{" "}
-                {r.tickers.join(", ")}
-              </Text>
-
-              <Pressable onPress={() => confirmDelete(r.id)} style={styles.deleteBtn}>
-                <Text style={styles.deleteText}>Delete</Text>
-              </Pressable>
+          <View style={styles.row}>
+            <View style={styles.rowItem}>
+              <Text style={styles.label}>Min prob_up (0–1)</Text>
+              <TextInput
+                value={minProbUp}
+                onChangeText={setMinProbUp}
+                style={styles.input}
+                placeholder="0.65"
+                keyboardType="decimal-pad"
+              />
             </View>
-          ))
-        )}
+
+            <View style={styles.rowItem}>
+              <Text style={styles.label}>Horizon days</Text>
+              <TextInput
+                value={horizonDays}
+                onChangeText={setHorizonDays}
+                style={styles.input}
+                placeholder="5"
+                keyboardType="number-pad"
+              />
+            </View>
+          </View>
+
+          <Pressable style={styles.button} onPress={subscribe} disabled={loading}>
+            <Text style={styles.buttonText}>{loading ? "Submitting..." : "Subscribe"}</Text>
+          </Pressable>
+
+          <Text style={styles.hint}>
+            This calls <Text style={styles.mono}>POST /api/alerts/subscribe</Text>.
+          </Text>
+        </View>
 
         <View style={styles.rowBetween}>
-          <Text style={styles.sectionTitle}>History</Text>
-          <Pressable style={styles.outlineBtn} onPress={clearHistory}>
-            <Text style={styles.outlineBtnText}>Clear</Text>
+          <Text style={styles.sectionTitle}>Subscriptions</Text>
+          <Pressable style={styles.outlineBtn} onPress={refreshSubscriptions} disabled={subsLoading}>
+            <Text style={styles.outlineBtnText}>{subsLoading ? "Loading..." : "Refresh"}</Text>
           </Pressable>
         </View>
 
-        {history.length === 0 ? (
-          <Text style={styles.muted}>No triggered alerts yet.</Text>
+        {subsLoading ? <ActivityIndicator /> : null}
+
+        {subs.length === 0 ? (
+          <Text style={styles.muted}>
+            Subscription list isn’t available yet (backend is missing GET /api/alerts/subscriptions).
+          </Text>
         ) : (
-          history.slice(0, 40).map((h, idx) => (
-            <View key={`${h.time}-${h.ruleId}-${idx}`} style={styles.historyItem}>
-              <Text style={styles.historyTop}>
-                {h.time} • {h.ruleName}
+          subs.slice(0, 50).map((s, idx) => (
+            <View key={String(s.id ?? idx)} style={styles.item}>
+              <Text style={styles.itemTitle}>{String(s.email || "—")}</Text>
+              <Text style={styles.itemMeta}>
+                tickers: {Array.isArray(s.tickers) ? s.tickers.join(", ") : "—"}
               </Text>
-              <Text style={styles.historyLine}>
-                {h.ticker} • {fmtProb(h.prob_up)} • {h.confidence}
-                {h.as_of_date ? ` • as_of ${h.as_of_date}` : ""}
+              <Text style={styles.itemMeta}>
+                min_conf: {String(s.min_confidence || "—")} • min_prob_up:{" "}
+                {s.min_prob_up == null ? "—" : fmtPct01(s.min_prob_up, 0)} • horizon: {s.horizon_days ?? "—"}d
               </Text>
+              {s.created_at ? <Text style={styles.itemSmall}>created_at: {String(s.created_at)}</Text> : null}
+              {s.updated_at ? <Text style={styles.itemSmall}>updated_at: {String(s.updated_at)}</Text> : null}
             </View>
           ))
         )}
@@ -476,6 +407,9 @@ const styles = StyleSheet.create({
   chipText: { fontWeight: "900", color: "#111", fontSize: 12 },
   chipTextActive: { color: "white" },
 
+  row: { flexDirection: "row", gap: 10 },
+  rowItem: { flex: 1 },
+
   button: {
     backgroundColor: "#111",
     paddingVertical: 12,
@@ -484,6 +418,9 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   buttonText: { color: "white", fontSize: 16, fontWeight: "700" },
+
+  hint: { fontSize: 12, color: "#666" },
+  mono: { fontFamily: "monospace" },
 
   rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   sectionTitle: { fontSize: 18, fontWeight: "900" },
@@ -507,31 +444,7 @@ const styles = StyleSheet.create({
     gap: 6,
     backgroundColor: "white",
   },
-  itemTitle: { fontWeight: "900", fontSize: 16 },
+  itemTitle: { fontWeight: "900", fontSize: 14 },
   itemMeta: { color: "#666", fontSize: 12 },
-
-  badge: {
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  badgeOn: { backgroundColor: "#111" },
-  badgeOff: { backgroundColor: "#ddd" },
-
-  badgeText: { color: "white", fontWeight: "900", fontSize: 12 },
-  badgeTextOff: { color: "#111" },
-
-  deleteBtn: { alignSelf: "flex-start", marginTop: 4 },
-  deleteText: { color: "#a40000", fontWeight: "900" },
-
-  historyItem: {
-    borderWidth: 1,
-    borderColor: "#eee",
-    borderRadius: 12,
-    padding: 12,
-    backgroundColor: "white",
-    gap: 4,
-  },
-  historyTop: { fontWeight: "900", color: "#111" },
-  historyLine: { color: "#666", fontSize: 12 },
+  itemSmall: { color: "#888", fontSize: 11 },
 });

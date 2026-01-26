@@ -35,8 +35,21 @@ const STORAGE_KEYS = {
 };
 
 const DEFAULT_TICKERS = [
-  "AMZN", "META", "TSLA", "NVDA", "NFLX", "AMD", "INTC", "JPM", "BAC", "GS",
-  "MS", "XOM", "CVX", "SPY", "QQQ",
+  "AMZN",
+  "META",
+  "TSLA",
+  "NVDA",
+  "NFLX",
+  "AMD",
+  "INTC",
+  "JPM",
+  "BAC",
+  "GS",
+  "MS",
+  "XOM",
+  "CVX",
+  "SPY",
+  "QQQ",
 ];
 
 type DirectionFilter = "ALL" | "UP" | "DOWN";
@@ -74,6 +87,13 @@ type SummaryResponse = {
   error?: string;
   note?: string | null;
   [k: string]: any;
+};
+
+// verify mini response for sparkline
+type VerifyMini = {
+  ok?: boolean;
+  ticker?: string;
+  series?: { n?: number; closes?: number[]; dates?: string[] };
 };
 
 function normalizeTickers(input: string): string[] {
@@ -172,6 +192,34 @@ function goToNews(ticker?: string) {
   });
 }
 
+// no-library sparkline using block characters
+function sparkAscii(closes: number[], width = 22) {
+  if (!closes || closes.length < 2) return "";
+  const vals = closes.filter((x) => Number.isFinite(x));
+  if (vals.length < 2) return "";
+
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of vals) {
+    min = Math.min(min, v);
+    max = Math.max(max, v);
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) return "▁".repeat(width);
+
+  const blocks = "▁▂▃▄▅▆▇█";
+  const step = Math.max(1, Math.floor(vals.length / width));
+
+  let out = "";
+  for (let i = 0; i < vals.length; i += step) {
+    const v = vals[i];
+    const t = (v - min) / (max - min);
+    const idx = Math.max(0, Math.min(blocks.length - 1, Math.round(t * (blocks.length - 1))));
+    out += blocks[idx];
+    if (out.length >= width) break;
+  }
+  return out;
+}
+
 export default function HomeScreen() {
   const [tickersInput, setTickersInput] = useState<string>(DEFAULT_TICKERS.join(", "));
   const [savedTickers, setSavedTickers] = useState<string[]>(DEFAULT_TICKERS);
@@ -190,6 +238,10 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState<boolean>(false);
   const [resp, setResp] = useState<SummaryResponse | null>(null);
   const [debugLine, setDebugLine] = useState<string>("");
+
+  // sparkline cache: ticker -> closes/dates
+  const [verifySeries, setVerifySeries] = useState<Record<string, { closes: number[]; dates: string[] }>>({});
+  const [verifyLoading, setVerifyLoading] = useState<Record<string, boolean>>({});
 
   const tickers = useMemo(() => normalizeTickers(tickersInput), [tickersInput]);
 
@@ -224,11 +276,11 @@ export default function HomeScreen() {
 
         if (saved) {
           const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed) && parsed.length) setSavedTickers(parsed);
+          if (Array.isArray(parsed) && parsed.length) setSavedTickers(parsed.map(String).map((x) => x.toUpperCase()));
         }
         if (recent) {
           const parsed = JSON.parse(recent);
-          if (Array.isArray(parsed)) setRecentRuns(parsed);
+          if (Array.isArray(parsed)) setRecentRuns(parsed.map(String));
         }
         if (lastInput && typeof lastInput === "string" && lastInput.trim()) {
           setTickersInput(lastInput);
@@ -274,16 +326,18 @@ export default function HomeScreen() {
     await persist(STORAGE_KEYS.lastTickersInput, val);
   }
 
-  async function persistPrefs(next?: Partial<{
-    horizonDays: number;
-    filter: DirectionFilter;
-    sortMode: SortMode;
-    retrainEveryRun: boolean;
-    showDebug: boolean;
-    highOnly: boolean;
-    sourcePref: SourcePref;
-    showLearn: boolean;
-  }>) {
+  async function persistPrefs(
+    next?: Partial<{
+      horizonDays: number;
+      filter: DirectionFilter;
+      sortMode: SortMode;
+      retrainEveryRun: boolean;
+      showDebug: boolean;
+      highOnly: boolean;
+      sourcePref: SourcePref;
+      showLearn: boolean;
+    }>
+  ) {
     const h = next?.horizonDays ?? horizonDays;
     const f = next?.filter ?? filter;
     const s = next?.sortMode ?? sortMode;
@@ -362,6 +416,41 @@ export default function HomeScreen() {
     return (await safeJson(res)) as SummaryResponse;
   }
 
+  async function fetchVerifySeries(tk: string) {
+    const t = String(tk || "").toUpperCase().trim();
+    if (!t) return;
+
+    // already have it?
+    if (verifySeries[t]?.closes?.length) return;
+    if (verifyLoading[t]) return;
+
+    setVerifyLoading((m) => ({ ...m, [t]: true }));
+
+    try {
+      const url = `${API_BASE}/api/verify?ticker=${encodeURIComponent(
+        t
+      )}&horizon_days=${encodeURIComponent(String(horizonDays))}&n=30&lookback_days=240&source_pref=${encodeURIComponent(
+        sourcePref
+      )}`;
+
+      const res = await fetch(url);
+      const j = (await safeJson(res)) as VerifyMini;
+
+      const closes = Array.isArray(j?.series?.closes)
+        ? j.series!.closes!.filter((x) => typeof x === "number" && Number.isFinite(x))
+        : [];
+      const dates = Array.isArray(j?.series?.dates) ? j.series!.dates!.map(String) : [];
+
+      if (closes.length >= 2) {
+        setVerifySeries((m) => ({ ...m, [t]: { closes, dates } }));
+      }
+    } catch {
+      // ignore verify failures (sparkline is optional)
+    } finally {
+      setVerifyLoading((m) => ({ ...m, [t]: false }));
+    }
+  }
+
   async function runPrediction() {
     const list = tickers.length ? tickers : DEFAULT_TICKERS;
     setLoading(true);
@@ -371,7 +460,9 @@ export default function HomeScreen() {
     const localGeneratedAt = nowISO();
 
     setDebugLine(
-      `Debug: tickers=${list.join(",")} horizon=${horizonDays} retrain=${retrainEveryRun ? "1" : "0"} highOnly=${highOnly ? "1" : "0"} source_pref=${sourcePref} local_run_id=${localRunId}`
+      `Debug: tickers=${list.join(",")} horizon=${horizonDays} retrain=${retrainEveryRun ? "1" : "0"} highOnly=${
+        highOnly ? "1" : "0"
+      } source_pref=${sourcePref} local_run_id=${localRunId}`
     );
 
     try {
@@ -472,6 +563,13 @@ export default function HomeScreen() {
 
     return arr;
   }, [predictions, filter, sortMode, highOnly]);
+
+  // Prefetch sparklines for first N items (legal hook placement)
+  useEffect(() => {
+    const first = filteredSorted.slice(0, 12).map((p) => String(p.ticker || "").toUpperCase());
+    first.forEach((t) => fetchVerifySeries(t));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredSorted.map((x) => x.ticker).join("|"), horizonDays, sourcePref]);
 
   const topUp = useMemo(() => {
     return [...predictions]
@@ -592,22 +690,18 @@ export default function HomeScreen() {
               }}
               style={styles.linkButton}
             >
-              <Text style={styles.linkButtonText}>
-                {showLearn ? "Hide beginner help" : "Show beginner help"}
-              </Text>
+              <Text style={styles.linkButtonText}>{showLearn ? "Hide beginner help" : "Show beginner help"}</Text>
             </Pressable>
 
             <Pressable onPress={() => openUrl(`${API_BASE}/api/explain`)} style={styles.linkButton}>
               <Text style={styles.linkButtonText}>Open full explain (JSON)</Text>
             </Pressable>
 
-            {/* NEW: Jump to News tab */}
             <Pressable onPress={() => goToNews(tickers[0] || "SPY")} style={styles.linkButton}>
               <Text style={styles.linkButtonText}>Open News</Text>
             </Pressable>
           </View>
 
-          {/* Beginner help (component) */}
           {showLearn ? <BeginnerHelp horizonDays={horizonDays} /> : null}
         </View>
 
@@ -616,7 +710,6 @@ export default function HomeScreen() {
           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
             <Text style={styles.sectionTitle}>Saved tickers</Text>
 
-            {/* NEW: News for current ticker */}
             <Pressable onPress={() => goToNews(tickers[0] || "SPY")} style={styles.linkButton}>
               <Text style={styles.linkButtonText}>News</Text>
             </Pressable>
@@ -649,10 +742,7 @@ export default function HomeScreen() {
               <Text style={styles.smallButtonText}>Save first ticker</Text>
             </Pressable>
 
-            <Pressable
-              onPress={() => applyTickerCSV(DEFAULT_TICKERS.join(", "))}
-              style={styles.smallButton}
-            >
+            <Pressable onPress={() => applyTickerCSV(DEFAULT_TICKERS.join(", "))} style={styles.smallButton}>
               <Text style={styles.smallButtonText}>Defaults</Text>
             </Pressable>
           </View>
@@ -711,8 +801,7 @@ export default function HomeScreen() {
                   <View style={styles.row}>
                     <Pressable
                       onPress={() => {
-                        const next: DirectionFilter =
-                          filter === "ALL" ? "UP" : filter === "UP" ? "DOWN" : "ALL";
+                        const next: DirectionFilter = filter === "ALL" ? "UP" : filter === "UP" ? "DOWN" : "ALL";
                         setFilter(next);
                         persist(STORAGE_KEYS.lastFilter, next);
                       }}
@@ -724,23 +813,14 @@ export default function HomeScreen() {
                     <Pressable
                       onPress={() => {
                         const next: SortMode =
-                          sortMode === "PROB_DESC"
-                            ? "EXP_DESC"
-                            : sortMode === "EXP_DESC"
-                            ? "TICKER_ASC"
-                            : "PROB_DESC";
+                          sortMode === "PROB_DESC" ? "EXP_DESC" : sortMode === "EXP_DESC" ? "TICKER_ASC" : "PROB_DESC";
                         setSortMode(next);
                         persist(STORAGE_KEYS.lastSort, next);
                       }}
                       style={styles.smallButton}
                     >
                       <Text style={styles.smallButtonText}>
-                        Sort:{" "}
-                        {sortMode === "PROB_DESC"
-                          ? "Prob ↓"
-                          : sortMode === "EXP_DESC"
-                          ? "Exp ↓"
-                          : "Ticker A–Z"}
+                        Sort: {sortMode === "PROB_DESC" ? "Prob ↓" : sortMode === "EXP_DESC" ? "Exp ↓" : "Ticker A–Z"}
                       </Text>
                     </Pressable>
 
@@ -757,9 +837,13 @@ export default function HomeScreen() {
                       <Text style={styles.smallButtonText}>{showDebug ? "Hide Debug" : "Show Debug"}</Text>
                     </Pressable>
 
-                    {/* NEW: News for the top ticker */}
-                    <Pressable onPress={() => goToNews(filteredSorted[0]?.ticker || tickers[0])} style={styles.smallButton}>
-                      <Text style={styles.smallButtonText}>News: {String(filteredSorted[0]?.ticker || tickers[0] || "SPY")}</Text>
+                    <Pressable
+                      onPress={() => goToNews(filteredSorted[0]?.ticker || tickers[0])}
+                      style={styles.smallButton}
+                    >
+                      <Text style={styles.smallButtonText}>
+                        News: {String(filteredSorted[0]?.ticker || tickers[0] || "SPY")}
+                      </Text>
                     </Pressable>
                   </View>
 
@@ -769,7 +853,16 @@ export default function HomeScreen() {
                       {topUp.length === 0 ? (
                         <Text style={styles.muted}>None.</Text>
                       ) : (
-                        topUp.map((p) => <ResultCard key={`up-${p.ticker}`} p={p} sourcePref={sourcePref} />)
+                        topUp.map((p) => (
+                          <ResultCard
+                            key={`up-${p.ticker}`}
+                            p={p}
+                            sourcePref={sourcePref}
+                            spark={verifySeries[String(p.ticker || "").toUpperCase()]?.closes}
+                            sparkLoading={!!verifyLoading[String(p.ticker || "").toUpperCase()]}
+                            onNeedSpark={fetchVerifySeries}
+                          />
+                        ))
                       )}
                     </View>
 
@@ -778,14 +871,30 @@ export default function HomeScreen() {
                       {topDown.length === 0 ? (
                         <Text style={styles.muted}>None.</Text>
                       ) : (
-                        topDown.map((p) => <ResultCard key={`down-${p.ticker}`} p={p} sourcePref={sourcePref} />)
+                        topDown.map((p) => (
+                          <ResultCard
+                            key={`down-${p.ticker}`}
+                            p={p}
+                            sourcePref={sourcePref}
+                            spark={verifySeries[String(p.ticker || "").toUpperCase()]?.closes}
+                            sparkLoading={!!verifyLoading[String(p.ticker || "").toUpperCase()]}
+                            onNeedSpark={fetchVerifySeries}
+                          />
+                        ))
                       )}
                     </View>
                   </View>
 
                   <Text style={styles.sectionSubtitle}>All results</Text>
                   {filteredSorted.map((p) => (
-                    <ResultCard key={`all-${p.ticker}`} p={p} sourcePref={sourcePref} />
+                    <ResultCard
+                      key={`all-${p.ticker}`}
+                      p={p}
+                      sourcePref={sourcePref}
+                      spark={verifySeries[String(p.ticker || "").toUpperCase()]?.closes}
+                      sparkLoading={!!verifyLoading[String(p.ticker || "").toUpperCase()]}
+                      onNeedSpark={fetchVerifySeries}
+                    />
                   ))}
 
                   {showDebug ? (
@@ -805,7 +914,19 @@ export default function HomeScreen() {
   );
 }
 
-function ResultCard({ p, sourcePref }: { p: PredRow; sourcePref: SourcePref }) {
+function ResultCard({
+  p,
+  sourcePref,
+  spark,
+  sparkLoading,
+  onNeedSpark,
+}: {
+  p: PredRow;
+  sourcePref: SourcePref;
+  spark?: number[];
+  sparkLoading?: boolean;
+  onNeedSpark: (ticker: string) => void;
+}) {
   const dir = (p.direction || "").toString().toUpperCase();
   const prob = typeof p.prob_up === "number" ? p.prob_up : Number(p.prob_up);
   const exp = typeof p.exp_return === "number" ? p.exp_return : Number(p.exp_return);
@@ -816,6 +937,18 @@ function ResultCard({ p, sourcePref }: { p: PredRow; sourcePref: SourcePref }) {
     conf === "HIGH" ? styles.badgeConfHigh : conf === "MEDIUM" ? styles.badgeConfMed : styles.badgeConfLow;
 
   const hz = p.horizon_days ?? 5;
+
+  // fetch spark if user scrolls and we didn't prefetch it
+  useEffect(() => {
+    if (!spark?.length && !sparkLoading) {
+      onNeedSpark(ticker);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticker]);
+
+  const sparkText = spark?.length ? sparkAscii(spark, 22) : "";
+
+  const up = spark?.length ? spark[spark.length - 1] >= spark[0] : true;
 
   return (
     <View style={styles.resultCard}>
@@ -834,9 +967,14 @@ function ResultCard({ p, sourcePref }: { p: PredRow; sourcePref: SourcePref }) {
       </View>
 
       <Text style={styles.resultMeta}>
-        exp: {fmtNum(exp, 4)}  •  horizon: {hz}d
-        {p.source ? `  •  src: ${p.source}` : ""}
+        exp: {fmtNum(exp, 4)} • horizon: {hz}d{p.source ? ` • src: ${p.source}` : ""}
       </Text>
+
+      {/* Sparkline row */}
+      <View style={styles.sparkRow}>
+        <View style={[styles.sparkDot, up ? styles.sparkDotUp : styles.sparkDotDown]} />
+        <Text style={styles.sparkText}>{sparkLoading ? "loading…" : sparkText || "—"}</Text>
+      </View>
 
       <View style={styles.row}>
         <Pressable
@@ -866,7 +1004,6 @@ function ResultCard({ p, sourcePref }: { p: PredRow; sourcePref: SourcePref }) {
           <Text style={styles.linkPillText}>Report card</Text>
         </Pressable>
 
-        {/* NEW: News for this ticker */}
         <Pressable onPress={() => goToNews(ticker)} style={styles.linkPill}>
           <Text style={styles.linkPillText}>News</Text>
         </Pressable>
@@ -875,8 +1012,8 @@ function ResultCard({ p, sourcePref }: { p: PredRow; sourcePref: SourcePref }) {
       {p.as_of_date ? (
         <Text style={styles.mutedSmall}>
           as_of: {String(p.as_of_date).slice(0, 10)}
-          {p.scored_at ? `  •  scored` : `  •  not scored yet`}
-          {p.realized_return != null ? `  •  realized: ${fmtPct(p.realized_return)}` : ""}
+          {p.scored_at ? ` • scored` : ` • not scored yet`}
+          {p.realized_return != null ? ` • realized: ${fmtPct(p.realized_return)}` : ""}
         </Text>
       ) : null}
     </View>
@@ -1008,10 +1145,34 @@ const styles = StyleSheet.create({
   resultProb: { color: "#E5E7EB", fontWeight: "800", marginLeft: "auto" },
   resultMeta: { color: "#A7B0C0", marginTop: 6 },
 
-   badge: {
+  badge: {
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 999,
-    backgroundColor: "#111",
   },
+  badgeText: { color: "#FFFFFF", fontWeight: "900", fontSize: 12 },
+
+  badgeUp: { backgroundColor: "#163A2A" },
+  badgeDown: { backgroundColor: "#3A1620" },
+
+  badgeConfHigh: { backgroundColor: "#2E6BFF" },
+  badgeConfMed: { backgroundColor: "#5B3DF5" },
+  badgeConfLow: { backgroundColor: "#374151" },
+
+  jsonBox: {
+    marginTop: 12,
+    backgroundColor: "#0B1220",
+    borderColor: "#223256",
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+  },
+
+  debug: { marginTop: 12, color: "#6B7280", fontSize: 12 },
+
+  sparkRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 },
+  sparkDot: { width: 8, height: 8, borderRadius: 4 },
+  sparkDotUp: { backgroundColor: "#35D07F" },
+  sparkDotDown: { backgroundColor: "#FF6B6B" },
+  sparkText: { color: "#A7B0C0", fontFamily: "monospace", fontSize: 12 },
 });

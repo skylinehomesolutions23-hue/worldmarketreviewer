@@ -1,3 +1,4 @@
+// mobile-expo/app/(tabs)/accuracy.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -34,6 +35,7 @@ type ReportCard = {
   high_confidence?: { label: string; lo: number; hi: number; count: number; hit_rate: number | null } | null;
   by_confidence?: Array<{ label: string; lo: number; hi: number; count: number; hit_rate: number | null }>;
   note?: string;
+  [k: string]: any;
 };
 
 type ScoreRow = {
@@ -49,10 +51,24 @@ type ScoreRow = {
   realized_return?: number | null;
   realized_direction?: string | null;
   scored_at?: string | null;
+  [k: string]: any;
 };
 
 function toUpperTicker(s: string) {
   return (s || "").toUpperCase().replace(/[^A-Z0-9.\-]/g, "").trim();
+}
+
+function uniq(arr: string[]) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const x of arr) {
+    const t = toUpperTicker(x);
+    if (t && !seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out;
 }
 
 function fmtPct(x?: number | null, digits = 1) {
@@ -69,6 +85,13 @@ function fmtProb(x?: number | null) {
   return `${(n * 100).toFixed(0)}%`;
 }
 
+function fmtNum(x?: number | null, digits = 2) {
+  if (x === null || x === undefined) return "—";
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  return n.toFixed(digits);
+}
+
 async function loadSavedTickers(): Promise<string[]> {
   for (const key of STORAGE_KEYS.savedTickersCandidates) {
     try {
@@ -83,8 +106,8 @@ async function loadSavedTickers(): Promise<string[]> {
       }
 
       if (Array.isArray(vals)) {
-        const out = Array.from(new Set(vals.map((x: any) => toUpperTicker(String(x))).filter(Boolean)));
-        if (out.length) return out;
+        const cleaned = uniq(vals.map(String));
+        if (cleaned.length) return cleaned;
       }
 
       if (typeof vals === "string") {
@@ -92,13 +115,13 @@ async function loadSavedTickers(): Promise<string[]> {
           .replace(/\s+/g, ",")
           .split(",")
           .map((s) => s.trim())
-          .filter(Boolean)
-          .map(toUpperTicker)
           .filter(Boolean);
-        const out = Array.from(new Set(parts));
-        if (out.length) return out;
+        const cleaned = uniq(parts);
+        if (cleaned.length) return cleaned;
       }
-    } catch {}
+    } catch {
+      // ignore
+    }
   }
 
   return ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"];
@@ -214,9 +237,7 @@ export default function AccuracyTab() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Accuracy</Text>
-      <Text style={styles.sub}>
-        This scores past predictions after they “mature” (once enough trading days pass).
-      </Text>
+      <Text style={styles.sub}>Scores past predictions after they “mature” (once enough trading days pass).</Text>
 
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.card}>
@@ -273,9 +294,7 @@ export default function AccuracyTab() {
             </Pressable>
           </View>
 
-          <Text style={styles.hint}>
-            Tip: Run “Score Predictions” once per day. Then “Refresh Accuracy” to see updated results.
-          </Text>
+          <Text style={styles.hint}>Tip: Run “Score Predictions” once per day. Then “Refresh Accuracy” to see updated results.</Text>
         </View>
 
         <View style={styles.sectionHeader}>
@@ -333,9 +352,7 @@ export default function AccuracyTab() {
               </View>
             ) : null}
 
-            <Text style={styles.hint}>
-              “Hit rate” = how often UP/DOWN matched reality (after the horizon passed).
-            </Text>
+            <Text style={styles.hint}>“Hit rate” = how often UP/DOWN matched reality (after the horizon passed).</Text>
           </View>
         )}
 
@@ -352,19 +369,17 @@ export default function AccuracyTab() {
               <View key={r.id} style={styles.item}>
                 <View style={styles.itemTop}>
                   <Text style={styles.itemTicker}>{r.ticker}</Text>
-                  <Text style={[styles.badge, ok ? styles.badgeOk : styles.badgeBad]}>
-                    {ok ? "HIT" : "MISS"}
-                  </Text>
+                  <Text style={[styles.badge, ok ? styles.badgeOk : styles.badgeBad]}>{ok ? "HIT" : "MISS"}</Text>
                 </View>
 
                 <Text style={styles.itemMeta}>
-                  pred: {(r.direction || "—").toString()} • prob_up {fmtProb(r.prob_up)} • exp {fmtPct(r.exp_return)}
+                  pred: {(r.direction || "—").toString()} • prob_up {fmtProb(r.prob_up)} • exp {fmtPct(r.exp_return, 1)}
                 </Text>
                 <Text style={styles.itemMeta}>
                   realized: {(r.realized_direction || "—").toString()} • return {fmtPct(r.realized_return, 2)}
                 </Text>
                 <Text style={styles.itemSmall}>
-                  as_of {String(r.as_of_date || "—")} • scored {String(r.scored_at || "—")}
+                  as_of {String(r.as_of_date || "—")} • close {fmtNum(r.as_of_close, 2)} • scored {String(r.scored_at || "—")}
                 </Text>
               </View>
             );
@@ -378,7 +393,7 @@ export default function AccuracyTab() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16, gap: 10 },
   title: { fontSize: 28, fontWeight: "800" },
-  sub: { color: "#666" },
+  sub: { color: "#666", marginBottom: 4 },
 
   scroll: { paddingBottom: 40, gap: 12 },
 

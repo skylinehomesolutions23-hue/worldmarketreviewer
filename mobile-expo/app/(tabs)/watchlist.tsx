@@ -127,7 +127,7 @@ async function safeJson(res: Response) {
 }
 
 /**
- * Mini sparkline (no SVG). Same style as Compare.
+ * Mini sparkline (no SVG).
  */
 function Sparkline({
   closes,
@@ -201,6 +201,9 @@ export default function WatchlistTab() {
 
   // sparkline cache (in-memory)
   const [sparkByTicker, setSparkByTicker] = useState<Record<string, number[]>>({});
+  const [sparkStatus, setSparkStatus] = useState<Record<string, "idle" | "loading" | "ok" | "fail">>(
+    {}
+  );
   const sparkReqId = useRef(0);
 
   const top10 = useMemo(() => (tickers.length ? tickers.slice(0, 10) : []), [tickers]);
@@ -214,6 +217,13 @@ export default function WatchlistTab() {
   function openNews(t: string) {
     const tk = toUpperTicker(t);
     router.push({ pathname: "/(tabs)/news", params: { ticker: tk } });
+  }
+
+  function openCompare(t: string) {
+    const tk = toUpperTicker(t);
+    // compare.tsx uses AsyncStorage lastTickersInput; we’ll pass it via params if you support it,
+    // but even if not, Compare still works with its own input.
+    router.push({ pathname: "/(tabs)/compare", params: { ticker: tk } });
   }
 
   async function fetchVerifySeries(ticker: string) {
@@ -232,18 +242,31 @@ export default function WatchlistTab() {
     return closes.length >= 2 ? closes : null;
   }
 
-  async function hydrateSparklinesFor(predictions: Prediction[]) {
+  async function hydrateSparklinesFor(tickersToHydrate: string[]) {
     const myId = ++sparkReqId.current;
 
-    // only do up to 10 (top10)
-    const list = uniq(predictions.map((p) => p.ticker)).slice(0, 10);
+    const list = uniq(tickersToHydrate).slice(0, 10);
+    if (list.length === 0) return;
 
-    // avoid re-fetching if we already have it
-    const need = list.filter((t) => !sparkByTicker[toUpperTicker(t)]);
+    const need = list.filter((t) => {
+      const tk = toUpperTicker(t);
+      if (!tk) return false;
+      if (sparkByTicker[tk]?.length) return false;
+      if (sparkStatus[tk] === "loading") return false;
+      if (sparkStatus[tk] === "fail") return false;
+      return true;
+    });
 
     if (need.length === 0) return;
 
-    // limit concurrency (2 at a time) so we don’t hammer API/mobile
+    // mark loading
+    setSparkStatus((prev) => {
+      const next = { ...prev };
+      for (const t of need) next[toUpperTicker(t)] = "loading";
+      return next;
+    });
+
+    // limit concurrency (2 at a time)
     const concurrency = 2;
     let idx = 0;
 
@@ -251,16 +274,21 @@ export default function WatchlistTab() {
       while (idx < need.length) {
         const i = idx++;
         const tk = toUpperTicker(need[i]);
+        if (!tk) continue;
 
         try {
           const closes = await fetchVerifySeries(tk);
-          if (myId !== sparkReqId.current) return; // canceled by newer run
+          if (myId !== sparkReqId.current) return; // canceled
 
           if (closes) {
             setSparkByTicker((prev) => ({ ...prev, [tk]: closes }));
+            setSparkStatus((prev) => ({ ...prev, [tk]: "ok" }));
+          } else {
+            setSparkStatus((prev) => ({ ...prev, [tk]: "fail" }));
           }
         } catch {
-          // ignore per ticker
+          if (myId !== sparkReqId.current) return;
+          setSparkStatus((prev) => ({ ...prev, [tk]: "fail" }));
         }
       }
     };
@@ -272,7 +300,6 @@ export default function WatchlistTab() {
     const list = top10.length ? top10 : ["SPY", "QQQ", "TSLA"];
     setLoading(true);
     setPreds([]);
-    // keep existing spark cache (so it feels instant on subsequent runs)
 
     try {
       const res = await fetch(`${API_BASE}/api/summary`, {
@@ -301,14 +328,22 @@ export default function WatchlistTab() {
       setPreds(got);
       setLastUpdated(new Date().toLocaleString());
 
-      // sparkline series for each ticker (non-blocking, but awaited here)
-      hydrateSparklinesFor(got).catch(() => {});
+      // hydrate sparklines for the predictions shown
+      hydrateSparklinesFor(got.map((p) => p.ticker)).catch(() => {});
     } catch (e: any) {
       Alert.alert("Watchlist error", e?.message || "Failed to fetch predictions");
     } finally {
       setLoading(false);
     }
   }
+
+  // If user has no predictions yet, we can still preload sparklines for the tracked top10.
+  useEffect(() => {
+    if (preds.length === 0 && top10.length) {
+      hydrateSparklinesFor(top10).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [top10.join("|")]);
 
   return (
     <View style={styles.container}>
@@ -349,11 +384,12 @@ export default function WatchlistTab() {
           preds.map((p) => {
             const tk = toUpperTicker(p.ticker);
             const closes = sparkByTicker[tk] || null;
+            const status = sparkStatus[tk] || "idle";
 
             return (
-              <View key={p.ticker} style={styles.item}>
+              <View key={tk || p.ticker} style={styles.item}>
                 <View style={styles.itemRow}>
-                  <Text style={styles.itemTicker}>{p.ticker}</Text>
+                  <Text style={styles.itemTicker}>{tk || p.ticker}</Text>
                   <Text style={styles.itemDir}>{(p.direction || "—").toString()}</Text>
                 </View>
 
@@ -372,13 +408,19 @@ export default function WatchlistTab() {
                   <View style={{ marginTop: 8 }}>
                     <Sparkline closes={closes} />
                   </View>
-                ) : (
+                ) : status === "loading" ? (
                   <Text style={styles.sparkMuted}>Loading sparkline…</Text>
+                ) : (
+                  <Text style={styles.sparkMuted}>Sparkline unavailable</Text>
                 )}
 
                 <View style={styles.actions}>
-                  <Pressable style={styles.smallBtn} onPress={() => openNews(p.ticker)}>
+                  <Pressable style={styles.smallBtn} onPress={() => openNews(tk)}>
                     <Text style={styles.smallBtnText}>Open News</Text>
+                  </Pressable>
+
+                  <Pressable style={styles.smallBtn} onPress={() => openCompare(tk)}>
+                    <Text style={styles.smallBtnText}>Open Compare</Text>
                   </Pressable>
                 </View>
               </View>
