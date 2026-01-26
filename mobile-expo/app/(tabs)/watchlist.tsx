@@ -1,5 +1,5 @@
-// app/(tabs)/watchlist.tsx
-import React, { useEffect, useMemo, useState } from "react";
+// mobile-expo/app/(tabs)/watchlist.tsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -21,9 +21,6 @@ const STORAGE_KEYS = {
     "wmr:savedTickers:v1",
     "savedTickers",
   ],
-  // Keep user prefs consistent across tabs
-  lastHorizon: "wmr:lastHorizon:v3",
-  lastSourcePref: "wmr:lastSourcePref:v3",
 };
 
 type Prediction = {
@@ -37,6 +34,14 @@ type Prediction = {
   as_of_close?: number | null;
   confidence?: string;
   confidence_score?: number | null;
+};
+
+type VerifyResponse = {
+  ticker?: string;
+  ok?: boolean;
+  series?: { n?: number; closes?: number[]; dates?: string[] };
+  note?: string;
+  [k: string]: any;
 };
 
 function toUpperTicker(s: string) {
@@ -80,7 +85,6 @@ async function loadSavedTickers(): Promise<string[]> {
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean);
-
         const cleaned = uniq(parts);
         if (cleaned.length) return cleaned;
       }
@@ -106,6 +110,13 @@ function fmtProb(x?: number | null) {
   return `${(n * 100).toFixed(0)}%`;
 }
 
+function fmtNum(x?: number | null, digits = 2) {
+  if (x === null || x === undefined) return "—";
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  return n.toFixed(digits);
+}
+
 async function safeJson(res: Response) {
   const txt = await res.text();
   try {
@@ -115,61 +126,153 @@ async function safeJson(res: Response) {
   }
 }
 
+/**
+ * Mini sparkline (no SVG). Same style as Compare.
+ */
+function Sparkline({
+  closes,
+  height = 36,
+  maxBars = 50,
+}: {
+  closes: number[];
+  height?: number;
+  maxBars?: number;
+}) {
+  const series = useMemo(() => {
+    const raw = Array.isArray(closes) ? closes.filter((x) => Number.isFinite(Number(x))) : [];
+    if (raw.length < 2) return null;
+
+    const take = raw.length > maxBars ? raw.slice(raw.length - maxBars) : raw.slice();
+    let mn = Infinity;
+    let mx = -Infinity;
+    for (const v of take) {
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+    if (!Number.isFinite(mn) || !Number.isFinite(mx)) return null;
+
+    const range = mx - mn;
+    const safeRange = range === 0 ? 1 : range;
+
+    const first = take[0];
+    const last = take[take.length - 1];
+    const up = last >= first;
+
+    const bars = take.map((v) => {
+      const t = (v - mn) / safeRange; // 0..1
+      const h = Math.max(2, Math.round(t * (height - 2)));
+      return h;
+    });
+
+    return { bars, up };
+  }, [closes, height, maxBars]);
+
+  if (!series) return null;
+
+  const barColor = series.up ? "#37D67A" : "#FF6B6B";
+
+  return (
+    <View style={[styles.sparkWrap, { height }]}>
+      <View style={styles.sparkBarsRow}>
+        {series.bars.map((h, idx) => (
+          <View
+            key={idx}
+            style={[
+              styles.sparkBar,
+              {
+                height: h,
+                backgroundColor: barColor,
+                opacity: idx === series.bars.length - 1 ? 1 : 0.85,
+              },
+            ]}
+          />
+        ))}
+      </View>
+    </View>
+  );
+}
+
 export default function WatchlistTab() {
   const [tickers, setTickers] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+
   const [preds, setPreds] = useState<Prediction[]>([]);
   const [lastUpdated, setLastUpdated] = useState<string>("");
 
-  // keep horizon/source in sync with the rest of the app
-  const [horizonDays, setHorizonDays] = useState<number>(5);
-  const [sourcePref, setSourcePref] = useState<"auto" | "stooq" | "yahoo">("auto");
+  // sparkline cache (in-memory)
+  const [sparkByTicker, setSparkByTicker] = useState<Record<string, number[]>>({});
+  const sparkReqId = useRef(0);
 
-  const top10 = useMemo(
-    () => (tickers.length ? tickers.slice(0, 10) : []),
-    [tickers]
-  );
+  const top10 = useMemo(() => (tickers.length ? tickers.slice(0, 10) : []), [tickers]);
 
   useEffect(() => {
     loadSavedTickers()
       .then((t) => setTickers(t))
       .catch(() => setTickers(["SPY", "QQQ", "TSLA"]));
-
-    (async () => {
-      try {
-        const [h, sp] = await Promise.all([
-          AsyncStorage.getItem(STORAGE_KEYS.lastHorizon),
-          AsyncStorage.getItem(STORAGE_KEYS.lastSourcePref),
-        ]);
-
-        const hn = Number(h);
-        if (Number.isFinite(hn) && hn > 0) setHorizonDays(hn);
-
-        const s = (sp || "auto").toString().toLowerCase();
-        if (s === "stooq" || s === "yahoo" || s === "auto") {
-          setSourcePref(s);
-        }
-      } catch {
-        // ignore
-      }
-    })();
   }, []);
 
-  async function persistPrefs(nextH: number, nextSource: "auto" | "stooq" | "yahoo") {
-    try {
-      await Promise.all([
-        AsyncStorage.setItem(STORAGE_KEYS.lastHorizon, String(nextH)),
-        AsyncStorage.setItem(STORAGE_KEYS.lastSourcePref, nextSource),
-      ]);
-    } catch {
-      // ignore
-    }
+  function openNews(t: string) {
+    const tk = toUpperTicker(t);
+    router.push({ pathname: "/(tabs)/news", params: { ticker: tk } });
+  }
+
+  async function fetchVerifySeries(ticker: string) {
+    const tk = toUpperTicker(ticker);
+    if (!tk) return null;
+
+    const url = `${API_BASE}/api/verify?ticker=${encodeURIComponent(
+      tk
+    )}&horizon_days=5&n=60&lookback_days=240&source_pref=auto`;
+
+    const res = await fetch(url);
+    const j = (await safeJson(res)) as VerifyResponse;
+
+    if (!res.ok) return null;
+    const closes = Array.isArray(j?.series?.closes) ? (j.series!.closes as number[]) : [];
+    return closes.length >= 2 ? closes : null;
+  }
+
+  async function hydrateSparklinesFor(predictions: Prediction[]) {
+    const myId = ++sparkReqId.current;
+
+    // only do up to 10 (top10)
+    const list = uniq(predictions.map((p) => p.ticker)).slice(0, 10);
+
+    // avoid re-fetching if we already have it
+    const need = list.filter((t) => !sparkByTicker[toUpperTicker(t)]);
+
+    if (need.length === 0) return;
+
+    // limit concurrency (2 at a time) so we don’t hammer API/mobile
+    const concurrency = 2;
+    let idx = 0;
+
+    const runOne = async () => {
+      while (idx < need.length) {
+        const i = idx++;
+        const tk = toUpperTicker(need[i]);
+
+        try {
+          const closes = await fetchVerifySeries(tk);
+          if (myId !== sparkReqId.current) return; // canceled by newer run
+
+          if (closes) {
+            setSparkByTicker((prev) => ({ ...prev, [tk]: closes }));
+          }
+        } catch {
+          // ignore per ticker
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: concurrency }, () => runOne()));
   }
 
   async function runPredictions() {
     const list = top10.length ? top10 : ["SPY", "QQQ", "TSLA"];
     setLoading(true);
     setPreds([]);
+    // keep existing spark cache (so it feels instant on subsequent runs)
 
     try {
       const res = await fetch(`${API_BASE}/api/summary`, {
@@ -178,21 +281,14 @@ export default function WatchlistTab() {
         body: JSON.stringify({
           tickers: list,
           retrain: false,
-          horizon_days: horizonDays,
+          horizon_days: 5,
           base_weekly_move: 0.02,
           max_parallel: 4,
-          source_pref: sourcePref,
+          source_pref: "auto",
         }),
       });
 
-      const json = (await safeJson(res)) as any;
-
-      if (!res.ok) {
-        const msg = `HTTP ${res.status}: ${JSON.stringify(json).slice(0, 300)}`;
-        Alert.alert("Watchlist error", msg);
-        return;
-      }
-
+      const json = await res.json();
       const got: Prediction[] = Array.isArray(json?.predictions) ? json.predictions : [];
 
       // Sort: highest confidence first, then highest prob_up
@@ -204,6 +300,9 @@ export default function WatchlistTab() {
 
       setPreds(got);
       setLastUpdated(new Date().toLocaleString());
+
+      // sparkline series for each ticker (non-blocking, but awaited here)
+      hydrateSparklinesFor(got).catch(() => {});
     } catch (e: any) {
       Alert.alert("Watchlist error", e?.message || "Failed to fetch predictions");
     } finally {
@@ -211,43 +310,13 @@ export default function WatchlistTab() {
     }
   }
 
-  function openNews(t: string) {
-    const tk = toUpperTicker(t);
-    router.push({ pathname: "/(tabs)/news", params: { ticker: tk } });
-  }
-
-  function cycleHorizon() {
-    const next = horizonDays === 5 ? 10 : horizonDays === 10 ? 20 : 5;
-    setHorizonDays(next);
-    persistPrefs(next, sourcePref).catch(() => {});
-  }
-
-  function cycleSource() {
-    const next: "auto" | "stooq" | "yahoo" =
-      sourcePref === "auto" ? "stooq" : sourcePref === "stooq" ? "yahoo" : "auto";
-    setSourcePref(next);
-    persistPrefs(horizonDays, next).catch(() => {});
-  }
-
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Watchlist</Text>
-      <Text style={styles.sub}>Tracks your saved tickers (max 10).</Text>
+      <Text style={styles.sub}>Tracks your saved tickers (max 10). Includes mini sparklines.</Text>
 
       <View style={styles.card}>
-        <View style={styles.rowBetween}>
-          <Text style={styles.label}>Tracked</Text>
-
-          <View style={styles.rowRight}>
-            <Pressable style={styles.pillBtn} onPress={cycleHorizon}>
-              <Text style={styles.pillText}>Horizon: {horizonDays}d</Text>
-            </Pressable>
-
-            <Pressable style={styles.pillBtn} onPress={cycleSource}>
-              <Text style={styles.pillText}>Source: {sourcePref}</Text>
-            </Pressable>
-          </View>
-        </View>
+        <Text style={styles.label}>Tracked</Text>
 
         <View style={styles.chips}>
           {(top10.length ? top10 : ["SPY", "QQQ", "TSLA"]).map((t) => (
@@ -258,9 +327,7 @@ export default function WatchlistTab() {
         </View>
 
         <Pressable style={styles.button} onPress={runPredictions} disabled={loading}>
-          <Text style={styles.buttonText}>
-            {loading ? "Running..." : "Run predictions for top 10"}
-          </Text>
+          <Text style={styles.buttonText}>{loading ? "Running..." : "Run predictions for top 10"}</Text>
         </Pressable>
 
         {lastUpdated ? (
@@ -279,29 +346,44 @@ export default function WatchlistTab() {
         {preds.length === 0 ? (
           <Text style={styles.muted}>No predictions yet. Tap “Run predictions for top 10”.</Text>
         ) : (
-          preds.map((p) => (
-            <View key={p.ticker} style={styles.item}>
-              <View style={styles.itemRow}>
-                <Text style={styles.itemTicker}>{p.ticker}</Text>
-                <Text style={styles.itemDir}>{(p.direction || "—").toString()}</Text>
+          preds.map((p) => {
+            const tk = toUpperTicker(p.ticker);
+            const closes = sparkByTicker[tk] || null;
+
+            return (
+              <View key={p.ticker} style={styles.item}>
+                <View style={styles.itemRow}>
+                  <Text style={styles.itemTicker}>{p.ticker}</Text>
+                  <Text style={styles.itemDir}>{(p.direction || "—").toString()}</Text>
+                </View>
+
+                <Text style={styles.itemMeta}>
+                  prob_up: {fmtProb(p.prob_up)} • confidence: {(p.confidence || "—").toString()} • exp:{" "}
+                  {fmtPct(p.exp_return)}
+                </Text>
+
+                <Text style={styles.itemMeta}>
+                  as_of: {(p.as_of_date || "—").toString()} • close: {fmtNum(p.as_of_close, 2)} • source:{" "}
+                  {(p.source || "—").toString()}
+                </Text>
+
+                {/* Sparkline */}
+                {closes ? (
+                  <View style={{ marginTop: 8 }}>
+                    <Sparkline closes={closes} />
+                  </View>
+                ) : (
+                  <Text style={styles.sparkMuted}>Loading sparkline…</Text>
+                )}
+
+                <View style={styles.actions}>
+                  <Pressable style={styles.smallBtn} onPress={() => openNews(p.ticker)}>
+                    <Text style={styles.smallBtnText}>Open News</Text>
+                  </Pressable>
+                </View>
               </View>
-
-              <Text style={styles.itemMeta}>
-                prob_up: {fmtProb(p.prob_up)} • confidence: {(p.confidence || "—").toString()} • exp:{" "}
-                {fmtPct(p.exp_return)}
-              </Text>
-
-              <Text style={styles.itemMeta}>
-                as_of: {(p.as_of_date || "—").toString()} • source: {(p.source || "—").toString()}
-              </Text>
-
-              <View style={styles.actions}>
-                <Pressable style={styles.smallBtn} onPress={() => openNews(p.ticker)}>
-                  <Text style={styles.smallBtnText}>Open News</Text>
-                </Pressable>
-              </View>
-            </View>
-          ))
+            );
+          })
         )}
       </ScrollView>
     </View>
@@ -322,9 +404,6 @@ const styles = StyleSheet.create({
     backgroundColor: "white",
   },
 
-  rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
-  rowRight: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" },
-
   label: { fontSize: 12, color: "#666", marginBottom: 6 },
 
   chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
@@ -337,16 +416,6 @@ const styles = StyleSheet.create({
     backgroundColor: "white",
   },
   chipText: { fontWeight: "800", color: "#111", fontSize: 12 },
-
-  pillBtn: {
-    borderWidth: 1,
-    borderColor: "#111",
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: "white",
-  },
-  pillText: { fontWeight: "900", color: "#111", fontSize: 12 },
 
   button: {
     backgroundColor: "#111",
@@ -383,7 +452,7 @@ const styles = StyleSheet.create({
   itemDir: { fontSize: 12, fontWeight: "900", color: "#111" },
   itemMeta: { fontSize: 12, color: "#666" },
 
-  actions: { flexDirection: "row", gap: 8, marginTop: 4 },
+  actions: { flexDirection: "row", gap: 8, marginTop: 8 },
   smallBtn: {
     borderWidth: 1,
     borderColor: "#111",
@@ -392,4 +461,24 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   smallBtnText: { fontWeight: "900", color: "#111", fontSize: 12 },
+
+  // Sparkline styles
+  sparkWrap: {
+    borderWidth: 1,
+    borderColor: "#eee",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: "white",
+  },
+  sparkBarsRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 2,
+  },
+  sparkBar: {
+    width: 3,
+    borderRadius: 2,
+  },
+  sparkMuted: { fontSize: 12, color: "#888", marginTop: 6 },
 });

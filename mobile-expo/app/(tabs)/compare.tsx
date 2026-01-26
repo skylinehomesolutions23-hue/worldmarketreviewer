@@ -1,4 +1,4 @@
-// app/(tabs)/compare.tsx
+// mobile-expo/app/(tabs)/compare.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -73,6 +73,89 @@ async function safeJson(res: Response) {
   }
 }
 
+/**
+ * Tiny sparkline using plain Views (no SVG libs).
+ * - Uses last N closes (default 60)
+ * - Colors trend using last-first (greenish up, reddish down)
+ */
+function Sparkline({
+  closes,
+  width = "100%",
+  height = 46,
+  maxBars = 60,
+}: {
+  closes: number[];
+  width?: any;
+  height?: number;
+  maxBars?: number;
+}) {
+  const series = useMemo(() => {
+    const raw = Array.isArray(closes) ? closes.filter((x) => Number.isFinite(Number(x))) : [];
+    if (raw.length < 2) return null;
+
+    const take = raw.length > maxBars ? raw.slice(raw.length - maxBars) : raw.slice();
+    let mn = Infinity;
+    let mx = -Infinity;
+    for (const v of take) {
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+    if (!Number.isFinite(mn) || !Number.isFinite(mx)) return null;
+
+    // If flat, make a tiny range so bars still render
+    const range = mx - mn;
+    const safeRange = range === 0 ? 1 : range;
+
+    const first = take[0];
+    const last = take[take.length - 1];
+    const up = last >= first;
+
+    // Normalize to 0..1 then map to heights
+    const bars = take.map((v) => {
+      const t = (v - mn) / safeRange; // 0..1
+      // keep some minimum height so it looks alive
+      const h = Math.max(2, Math.round(t * (height - 2)));
+      return h;
+    });
+
+    return { bars, up, mn, mx, first, last };
+  }, [closes, height, maxBars]);
+
+  if (!series) return null;
+
+  const barColor = series.up ? "#37D67A" : "#FF6B6B"; // green/red
+  const dimLine = "#223256";
+
+  return (
+    <View style={[styles.sparkWrap, { width, height }]}>
+      {/* faint baseline/grid */}
+      <View style={[styles.sparkGrid, { borderColor: dimLine }]} />
+
+      <View style={styles.sparkBarsRow}>
+        {series.bars.map((h, idx) => (
+          <View
+            key={idx}
+            style={[
+              styles.sparkBar,
+              {
+                height: h,
+                backgroundColor: barColor,
+                opacity: idx === series.bars.length - 1 ? 1 : 0.85,
+              },
+            ]}
+          />
+        ))}
+      </View>
+
+      <View style={styles.sparkMetaRow}>
+        <Text style={styles.sparkMetaText}>
+          {series.up ? "trend up" : "trend down"} • min {fmtNum(series.mn, 2)} • max {fmtNum(series.mx, 2)}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 export default function CompareScreen() {
   const [savedTickers, setSavedTickers] = useState<string[]>(["SPY", "QQQ"]);
   const [ticker, setTicker] = useState<string>("SPY");
@@ -109,7 +192,7 @@ export default function CompareScreen() {
         }
 
         const s = (sp || "auto").toString().toLowerCase();
-        if (s === "auto" || s === "stooq" || s === "yahoo") setSourcePref(s);
+        if (s === "auto" || s === "stooq" || s === "yahoo") setSourcePref(s as any);
       } catch {
         // ignore
       }
@@ -138,8 +221,8 @@ export default function CompareScreen() {
     const next = horizonDays === 5 ? 10 : horizonDays === 10 ? 20 : 5;
     setHorizonDays(next);
     persistPrefs(next, sourcePref).catch(() => {});
-    // optional: re-fetch immediately so the screen reflects the new horizon
-    fetchVerify(ticker, next).catch(() => {});
+    // re-fetch so KPIs and sparkline match
+    fetchVerify(ticker, next, sourcePref).catch(() => {});
   }
 
   function cycleSource() {
@@ -147,7 +230,7 @@ export default function CompareScreen() {
       sourcePref === "auto" ? "stooq" : sourcePref === "stooq" ? "yahoo" : "auto";
     setSourcePref(next);
     persistPrefs(horizonDays, next).catch(() => {});
-    // optional: re-fetch immediately so the screen reflects the new source
+    // re-fetch so KPIs and sparkline match
     fetchVerify(ticker, horizonDays, next).catch(() => {});
   }
 
@@ -211,6 +294,8 @@ export default function CompareScreen() {
     ? String(data?.realized?.horizon_start_date).slice(0, 10)
     : "";
 
+  const sparkCloses = Array.isArray(data?.series?.closes) ? (data?.series?.closes as number[]) : [];
+
   return (
     <View style={styles.screen}>
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
@@ -256,7 +341,7 @@ export default function CompareScreen() {
                 key={t}
                 onPress={() => {
                   setTicker(t);
-                  fetchVerify(t, horizonDays).catch(() => {});
+                  fetchVerify(t, horizonDays, sourcePref).catch(() => {});
                 }}
                 style={styles.chip}
               >
@@ -292,6 +377,16 @@ export default function CompareScreen() {
                 ) : null}
               </Text>
 
+              {/* Sparkline */}
+              {sparkCloses.length >= 2 ? (
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.sparkLabel}>Last {Math.min(60, sparkCloses.length)} closes</Text>
+                  <Sparkline closes={sparkCloses} height={46} maxBars={60} />
+                </View>
+              ) : (
+                <Text style={styles.hint}>No series data available for sparkline.</Text>
+              )}
+
               <View style={styles.kpiRow}>
                 <View style={styles.kpiBox}>
                   <Text style={styles.kpiLabel}>1D move</Text>
@@ -325,7 +420,7 @@ export default function CompareScreen() {
         </View>
 
         <Text style={styles.footerNote}>
-          Next step: we’ll optionally add a tiny sparkline chart right on this screen (still free).
+          Sparkline is a quick visual sanity-check. It’s not a prediction — it’s the recent price path.
         </Text>
       </ScrollView>
     </View>
@@ -424,4 +519,36 @@ const styles = StyleSheet.create({
   infoText: { color: "#A7B0C0", fontWeight: "700" },
 
   footerNote: { marginTop: 14, color: "#93A4C7", fontSize: 12, lineHeight: 16 },
+
+  // Sparkline styles
+  sparkLabel: { color: "#A7B0C0", fontWeight: "800", marginBottom: 6 },
+  sparkWrap: {
+    backgroundColor: "#0B1220",
+    borderColor: "#223256",
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    overflow: "hidden",
+  },
+  sparkGrid: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: "50%",
+    borderTopWidth: 1,
+    opacity: 0.6,
+  },
+  sparkBarsRow: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 2,
+  },
+  sparkBar: {
+    width: 3,
+    borderRadius: 2,
+  },
+  sparkMetaRow: { marginTop: 6 },
+  sparkMetaText: { color: "#A7B0C0", fontSize: 12, fontWeight: "700" },
 });
