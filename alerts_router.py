@@ -52,10 +52,6 @@ class SubscribeRequest(BaseModel):
 
 
 def _db_info_safe() -> Dict[str, Any]:
-    """
-    Returns safe parsed DATABASE_URL parts (no password).
-    Also helps detect newline/whitespace issues.
-    """
     raw = os.getenv("DATABASE_URL") or ""
     raw_stripped = raw.strip()
 
@@ -98,8 +94,54 @@ def alerts_health():
 
 @router.get("/db_info")
 def db_info():
-    # safe debug endpoint (no password)
     return {"ok": True, "db": _db_info_safe()}
+
+
+@router.get("/smtp_info")
+def smtp_info():
+    host = (os.getenv("SMTP_HOST") or "").strip()
+    port = (os.getenv("SMTP_PORT") or "").strip()
+    user = (os.getenv("SMTP_USER") or "").strip()
+    pwd = (os.getenv("SMTP_PASS") or "").strip()
+    from_email = (os.getenv("SMTP_FROM_EMAIL") or os.getenv("SMTP_USER") or "").strip()
+    use_tls = (os.getenv("SMTP_USE_TLS") or "1").strip() not in ("0", "false", "False")
+
+    return {
+        "ok": True,
+        "SMTP_HOST_set": bool(host),
+        "SMTP_PORT_set": bool(port),
+        "SMTP_USER_set": bool(user),
+        "SMTP_PASS_set": bool(pwd),
+        "SMTP_FROM_EMAIL_set": bool(from_email),
+        "SMTP_USE_TLS": use_tls,
+        "SMTP_USER_value": user,
+        "SMTP_FROM_EMAIL_value": from_email,
+    }
+
+
+# ✅ Keep ONE debug endpoint (query params)
+@router.post("/debug_check")
+def debug_check(
+    email: str,
+    tickers: str = "SPY,QQQ",
+    min_prob_up: float = 0.0,
+    min_confidence: str = "LOW",
+    horizon_days: int = 5,
+    source_pref: str = "auto",
+    max_parallel: int = 2,
+):
+    tickers_list = [t.strip().upper() for t in tickers.replace(" ", ",").split(",") if t.strip()]
+    out = run_alert_check(
+        email=email,
+        tickers=tickers_list,
+        min_prob_up=min_prob_up,
+        min_confidence=min_confidence,
+        horizon_days=horizon_days,
+        source_pref=source_pref,
+        max_parallel=max_parallel,
+        retrain=False,
+    )
+    return {"tickers_list": tickers_list, "out": out}
 
 
 @router.post("/subscribe")
@@ -123,7 +165,6 @@ def subscribe(req: SubscribeRequest):
         }
     )
 
-    # normalize tickers to list for client convenience (even if db failed)
     if isinstance(sub, dict):
         sub["tickers_list"] = _parse_tickers(sub.get("tickers"))
 
@@ -141,24 +182,15 @@ def subscription(email: str):
     return {"ok": True, "subscription": sub}
 
 
-# ✅ NEW: list subscriptions for the UI
-# Note: your mobile calls /api/alerts/subscriptions?limit=200
-# This returns {"items":[...]} as your app expects.
 @router.get("/subscriptions")
 def subscriptions(limit: int = 200) -> Dict[str, Any]:
     init_alerts_db()
 
     limit = max(1, min(2000, int(limit)))
-
-    # This function name suggests enabled-only; that matches your earlier SQL.
     rows = list_enabled_subscriptions(limit=limit) or []
 
-    # Add tickers_list for client convenience
     for r in rows:
-        try:
-            r["tickers_list"] = _parse_tickers(r.get("tickers"))
-        except Exception:
-            r["tickers_list"] = []
+        r["tickers_list"] = _parse_tickers(r.get("tickers"))
 
     return {"ok": True, "returned": len(rows), "items": rows}
 
@@ -177,18 +209,21 @@ def events(email: str, limit: int = 100):
     }
 
 
+# ✅ Add overrides so you can force a test email without relying on DB values
 @router.post("/run")
 def run_all(
     key: Optional[str] = None,
     email: Optional[str] = None,
     max_parallel: int = 4,
+    # overrides (optional)
+    override_min_prob_up: Optional[float] = None,
+    override_min_confidence: Optional[str] = None,
 ):
     init_alerts_db()
 
     cron_key = (os.getenv("ALERTS_CRON_KEY") or "").strip()
-    if cron_key:
-        if (key or "").strip() != cron_key:
-            return {"ok": False, "error": "Unauthorized (bad key)"}
+    if cron_key and (key or "").strip() != cron_key:
+        return {"ok": False, "error": "Unauthorized (bad key)"}
 
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     sent = 0
@@ -210,14 +245,22 @@ def run_all(
 
         em = (sub.get("email") or "").strip().lower()
         tickers_csv = (sub.get("tickers") or "").strip()
-        tickers_list = [t for t in tickers_csv.replace(" ", ",").split(",") if t.strip()]
-        tickers_list = [t.upper().strip() for t in tickers_list if t.strip()][:10]
+        tickers_list = [t.strip().upper() for t in tickers_csv.replace(" ", ",").split(",") if t.strip()][:10]
 
         min_prob_up = float(sub.get("min_prob_up") or 0.65)
         min_confidence = (sub.get("min_confidence") or "MEDIUM").upper().strip()
+
+        # apply overrides for testing
+        if override_min_prob_up is not None:
+            min_prob_up = float(override_min_prob_up)
+        if override_min_confidence is not None:
+            min_confidence = (override_min_confidence or "LOW").upper().strip()
+
         horizon_days = int(sub.get("horizon_days") or 5)
         source_pref = (sub.get("source_pref") or "auto").lower().strip()
-        cooldown_minutes = int(sub.get("cooldown_minutes") or 360)
+        cm = sub.get("cooldown_minutes")
+        cooldown_minutes = int(360 if cm is None else cm)
+
         last_sent_at = sub.get("last_sent_at")
 
         allow_send = cooldown_ok(last_sent_at, cooldown_minutes)
@@ -233,6 +276,21 @@ def run_all(
             retrain=False,
         )
 
+        if not run.get("ok"):
+            results.append(
+                {
+                    "email": em,
+                    "hits": 0,
+                    "cooldown_ok": allow_send,
+                    "emailed": False,
+                    "smtp_configured": smtp_configured(),
+                    "email_result": None,
+                    "errors": run.get("errors") or {},
+                    "note": "run_alert_check failed",
+                }
+            )
+            continue
+
         hits = run.get("hits") or []
         total_hits += len(hits)
 
@@ -244,17 +302,17 @@ def run_all(
 
         if hits and allow_send:
             subject = f"WorldMarketReviewer Alerts ({len(hits)})"
-            lines: List[str] = []
-            lines.append(f"Alert trigger time (UTC): {now}")
-            lines.append(f"Rule: prob_up≥{min_prob_up:.2f} & conf≥{min_confidence}")
-            lines.append(f"Horizon: {horizon_days} trading days")
-            lines.append("")
+            lines: List[str] = [
+                f"Alert trigger time (UTC): {now}",
+                f"Rule: prob_up≥{min_prob_up:.2f} & conf≥{min_confidence}",
+                f"Horizon: {horizon_days} trading days",
+                "",
+            ]
             for h in hits[:20]:
                 lines.append(
                     f"- {h.get('ticker')} | prob_up={(h.get('prob_up') or 0):.2f} | conf={h.get('confidence')} | as_of={h.get('as_of_date')} | source={h.get('source')}"
                 )
-            lines.append("")
-            lines.append("Tip: Too many emails? Increase cooldown_minutes in your subscription.")
+            lines += ["", "Tip: Too many emails? Increase cooldown_minutes in your subscription."]
 
             email_result = send_email_alert(em, subject, "\n".join(lines))
             if isinstance(email_result, dict) and email_result.get("ok"):
@@ -283,16 +341,3 @@ def run_all(
         "results_sample": results[:25],
         "note": "Use Render Cron to call /api/alerts/run?key=... on a schedule.",
     }
-
-@router.get("/subscriptions")
-def subscriptions(limit: int = 200) -> Dict[str, Any]:
-    init_alerts_db()
-
-    limit = max(1, min(2000, int(limit)))
-    rows = list_enabled_subscriptions(limit=limit) or []
-
-    # add tickers_list for mobile convenience
-    for r in rows:
-        r["tickers_list"] = _parse_tickers(r.get("tickers"))
-
-    return {"ok": True, "returned": len(rows), "items": rows}

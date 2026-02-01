@@ -1,3 +1,4 @@
+# alerts_engine.py
 import os
 import smtplib
 from email.message import EmailMessage
@@ -101,7 +102,6 @@ def run_alert_check(
 ) -> Dict[str, Any]:
     """
     Calls your own /api/summary endpoint and filters rows to produce alert hits.
-    This avoids duplicating prediction logic here.
     """
     base = (os.getenv("PUBLIC_BASE_URL") or "https://worldmarketreviewer.onrender.com").rstrip("/")
     url = f"{base}/api/summary"
@@ -117,28 +117,24 @@ def run_alert_check(
         "source_pref": source_pref,
     }
 
-    errors: Dict[str, Any] = {}
-    hits: List[Dict[str, Any]] = []
-
     try:
-        with httpx.Client(timeout=60) as client:
+        with httpx.Client(timeout=90) as client:
             r = client.post(url, json=payload)
             if r.status_code != 200:
-                return {
-                    "ok": False,
-                    "hits": [],
-                    "errors": {"summary_http": f"{r.status_code}: {r.text[:200]}"},
-                }
+                return {"ok": False, "hits": [], "errors": {"summary_http": f"{r.status_code}: {r.text[:300]}"}}
             summary = r.json()
     except Exception as e:
         return {"ok": False, "hits": [], "errors": {"summary_call": str(e)}}
 
-    rows = summary.get("rows") or summary.get("results") or summary.get("summary") or []
+    rows = summary.get("predictions") or []
     if not isinstance(rows, list):
         rows = []
 
     want_conf = (min_confidence or "MEDIUM").upper().strip()
-    want_prob = float(min_prob_up or 0.65)
+    want_prob = float(min_prob_up if min_prob_up is not None else 0.65)
+
+    errors: Dict[str, Any] = {}
+    hits: List[Dict[str, Any]] = []
 
     for row in rows:
         try:
@@ -151,7 +147,14 @@ def run_alert_check(
             except Exception:
                 pu_f = None
 
-            conf = (row.get("confidence") or row.get("confidence_label") or "").upper().strip()
+            conf = (
+                row.get("confidence")
+                or row.get("confidence_label")
+                or row.get("confidence_bucket")
+                or ""
+            )
+            conf = (conf or "").upper().strip()
+
             as_of = row.get("as_of_date") or row.get("date") or row.get("as_of") or None
             src = row.get("source") or row.get("data_source") or None
 

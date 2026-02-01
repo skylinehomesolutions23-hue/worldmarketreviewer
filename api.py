@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote_plus
+from dotenv import load_dotenv
+load_dotenv()
 
 import httpx
 from fastapi import FastAPI
