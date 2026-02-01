@@ -1,3 +1,4 @@
+# alerts_db.py
 import os
 import json
 from datetime import datetime, timezone
@@ -61,6 +62,10 @@ def init_alerts_db() -> Dict[str, Any]:
 
     CREATE INDEX IF NOT EXISTS alert_events_ticker_created_at
       ON alert_events (ticker, created_at DESC);
+
+    -- Helpful for per-ticker cooldown lookups:
+    CREATE INDEX IF NOT EXISTS alert_events_email_ticker_type_created_at
+      ON alert_events (email, ticker, event_type, created_at DESC);
     """
 
     try:
@@ -193,6 +198,7 @@ def list_enabled_subscriptions(limit: int = 200) -> List[Dict[str, Any]]:
 def set_last_sent_at(email: str, when_iso_utc: str) -> Dict[str, Any]:
     """
     Router calls set_last_sent_at(email, now_iso_string)
+    This remains as "last overall send" for UI/visibility.
     """
     url = _db_url()
     if not url:
@@ -260,6 +266,98 @@ def insert_alert_events(email: str, hits: List[Dict[str, Any]]) -> Dict[str, Any
         return {"ok": True, "inserted": len(rows)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def insert_email_sent_events(email: str, hits_sent: List[Dict[str, Any]], meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Insert event_type='EMAIL_SENT' per ticker that was actually included in an email.
+    Payload includes the hit plus optional meta (rule, horizon, etc.).
+    """
+    url = _db_url()
+    if not url:
+        return {"ok": False, "error": "DATABASE_URL not set"}
+
+    email = (email or "").strip().lower()
+    if not email:
+        return {"ok": False, "error": "email required"}
+
+    meta = meta or {}
+
+    rows = []
+    for h in hits_sent or []:
+        ticker = (h.get("ticker") or "").upper().strip()
+        if not ticker:
+            continue
+        payload = dict(h)
+        # Keep meta under a dedicated key so you can search/filter later.
+        payload["_meta"] = meta
+        rows.append((email, ticker, "EMAIL_SENT", json.dumps(payload)))
+
+    if not rows:
+        return {"ok": True, "inserted": 0}
+
+    q = """
+    INSERT INTO alert_events (email, ticker, event_type, payload)
+    VALUES (%s, %s, %s, %s::jsonb);
+    """
+
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_batch(cur, q, rows, page_size=200)
+        return {"ok": True, "inserted": len(rows)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def get_last_email_sent_by_ticker(email: str, tickers: List[str]) -> Dict[str, datetime]:
+    """
+    Returns a dict: { "SPY": <last EMAIL_SENT created_at>, ... } for this email.
+    If a ticker has never been emailed, it won't be present in the dict.
+    """
+    url = _db_url()
+    if not url:
+        return {}
+
+    email = (email or "").strip().lower()
+    if not email:
+        return {}
+
+    tks = []
+    seen = set()
+    for t in tickers or []:
+        tk = (t or "").upper().strip()
+        if not tk or tk in seen:
+            continue
+        seen.add(tk)
+        tks.append(tk)
+
+    if not tks:
+        return {}
+
+    q = """
+    SELECT ticker, MAX(created_at) AS last_sent_at
+    FROM alert_events
+    WHERE email = %s
+      AND event_type = 'EMAIL_SENT'
+      AND ticker = ANY(%s)
+    GROUP BY ticker;
+    """
+
+    try:
+        with _connect() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(q, (email, tks))
+                rows = cur.fetchall() or []
+        out: Dict[str, datetime] = {}
+        for r in rows:
+            tk = (r.get("ticker") or "").upper().strip()
+            dt = r.get("last_sent_at")
+            if tk and isinstance(dt, datetime):
+                out[tk] = dt
+        return out
+    except Exception:
+        return {}
 
 
 def get_alert_events(email: str, limit: int = 200) -> List[Dict[str, Any]]:

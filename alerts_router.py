@@ -10,8 +10,10 @@ from pydantic import BaseModel, EmailStr
 from alerts_db import (
     init_alerts_db,
     get_alert_events,
+    get_last_email_sent_by_ticker,
     get_subscription,
     insert_alert_events,
+    insert_email_sent_events,
     list_enabled_subscriptions,
     set_last_sent_at,
     upsert_subscription,
@@ -209,7 +211,7 @@ def events(email: str, limit: int = 100):
     }
 
 
-# ✅ Add overrides so you can force a test email without relying on DB values
+# ✅ Per-ticker cooldown enforced here
 @router.post("/run")
 def run_all(
     key: Optional[str] = None,
@@ -261,10 +263,6 @@ def run_all(
         cm = sub.get("cooldown_minutes")
         cooldown_minutes = int(360 if cm is None else cm)
 
-        last_sent_at = sub.get("last_sent_at")
-
-        allow_send = cooldown_ok(last_sent_at, cooldown_minutes)
-
         run = run_alert_check(
             email=em,
             tickers=tickers_list,
@@ -281,7 +279,7 @@ def run_all(
                 {
                     "email": em,
                     "hits": 0,
-                    "cooldown_ok": allow_send,
+                    "eligible_hits": 0,
                     "emailed": False,
                     "smtp_configured": smtp_configured(),
                     "email_result": None,
@@ -294,37 +292,73 @@ def run_all(
         hits = run.get("hits") or []
         total_hits += len(hits)
 
+        # Keep your existing behavior: log triggers when hits exist
         if hits:
             insert_alert_events(em, hits)
+
+        # Per-ticker cooldown decision:
+        last_sent_map = get_last_email_sent_by_ticker(em, [h.get("ticker") for h in hits])
+        eligible_hits: List[Dict[str, Any]] = []
+        blocked_tickers: List[str] = []
+
+        for h in hits:
+            tk = (h.get("ticker") or "").upper().strip()
+            last_dt = last_sent_map.get(tk)
+            if cooldown_ok(last_dt, cooldown_minutes):
+                eligible_hits.append(h)
+            else:
+                blocked_tickers.append(tk)
 
         did_send = False
         email_result = None
 
-        if hits and allow_send:
-            subject = f"WorldMarketReviewer Alerts ({len(hits)})"
+        if eligible_hits:
+            subject = f"WorldMarketReviewer Alerts ({len(eligible_hits)})"
             lines: List[str] = [
                 f"Alert trigger time (UTC): {now}",
                 f"Rule: prob_up≥{min_prob_up:.2f} & conf≥{min_confidence}",
                 f"Horizon: {horizon_days} trading days",
+                f"Cooldown: {cooldown_minutes} minutes (per ticker)",
                 "",
             ]
-            for h in hits[:20]:
+            for h in eligible_hits[:20]:
                 lines.append(
                     f"- {h.get('ticker')} | prob_up={(h.get('prob_up') or 0):.2f} | conf={h.get('confidence')} | as_of={h.get('as_of_date')} | source={h.get('source')}"
                 )
+
+            if blocked_tickers:
+                lines += [
+                    "",
+                    f"Blocked by per-ticker cooldown: {', '.join(sorted(set(blocked_tickers)))}",
+                ]
+
             lines += ["", "Tip: Too many emails? Increase cooldown_minutes in your subscription."]
 
             email_result = send_email_alert(em, subject, "\n".join(lines))
             if isinstance(email_result, dict) and email_result.get("ok"):
                 did_send = True
                 sent += 1
+
+                # Record EMAIL_SENT per ticker (this is what drives per-ticker cooldown)
+                meta = {
+                    "now_utc": now,
+                    "rule_min_prob_up": float(min_prob_up),
+                    "rule_min_confidence": str(min_confidence),
+                    "horizon_days": int(horizon_days),
+                    "cooldown_minutes": int(cooldown_minutes),
+                    "source_pref": str(source_pref),
+                }
+                insert_email_sent_events(em, eligible_hits, meta=meta)
+
+                # Optional: keep subscription.last_sent_at updated as "last overall send"
                 set_last_sent_at(em, now)
 
         results.append(
             {
                 "email": em,
                 "hits": len(hits),
-                "cooldown_ok": allow_send,
+                "eligible_hits": len(eligible_hits),
+                "blocked_tickers": sorted(set(blocked_tickers)),
                 "emailed": did_send,
                 "smtp_configured": smtp_configured(),
                 "email_result": email_result,
