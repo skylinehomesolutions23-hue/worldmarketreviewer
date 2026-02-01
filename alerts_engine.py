@@ -12,6 +12,16 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# ----------------------------
+# Email provider configuration
+# ----------------------------
+
+def resend_configured() -> bool:
+    key = (os.getenv("RESEND_API_KEY") or "").strip()
+    from_email = (os.getenv("RESEND_FROM_EMAIL") or "").strip()
+    return bool(key and from_email)
+
+
 def smtp_configured() -> bool:
     host = (os.getenv("SMTP_HOST") or "").strip()
     port = (os.getenv("SMTP_PORT") or "").strip()
@@ -32,9 +42,59 @@ def _smtp_settings() -> Dict[str, Any]:
     }
 
 
-def send_email_alert(to_email: str, subject: str, body: str) -> Dict[str, Any]:
+def _send_via_resend(to_email: str, subject: str, body_text: str) -> Dict[str, Any]:
+    """
+    Sends email using Resend HTTP API.
+    Requires:
+      RESEND_API_KEY
+      RESEND_FROM_EMAIL
+    Optional:
+      RESEND_FROM_NAME
+    """
+    api_key = (os.getenv("RESEND_API_KEY") or "").strip()
+    from_email = (os.getenv("RESEND_FROM_EMAIL") or "").strip()
+    from_name = (os.getenv("RESEND_FROM_NAME") or "WorldMarketReviewer").strip()
+
+    if not (api_key and from_email):
+        return {"ok": False, "provider": "resend", "note": "Resend not configured"}
+
+    # Resend expects "From" like: "Name <email@domain>"
+    from_header = f"{from_name} <{from_email}>"
+
+    payload = {
+        "from": from_header,
+        "to": [(to_email or "").strip().lower()],
+        "subject": subject,
+        # Use text for reliability; you can add HTML later if you want
+        "text": body_text,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        with httpx.Client(timeout=25) as client:
+            r = client.post("https://api.resend.com/emails", headers=headers, json=payload)
+
+        if r.status_code in (200, 201):
+            # Resend returns JSON like {"id":"..."}
+            try:
+                data = r.json()
+            except Exception:
+                data = {}
+            return {"ok": True, "provider": "resend", "status_code": r.status_code, "id": data.get("id")}
+
+        # Return a small slice of the error text
+        return {"ok": False, "provider": "resend", "status_code": r.status_code, "error": r.text[:500]}
+    except Exception as e:
+        return {"ok": False, "provider": "resend", "error": str(e)}
+
+
+def _send_via_smtp(to_email: str, subject: str, body: str) -> Dict[str, Any]:
     if not smtp_configured():
-        return {"ok": False, "note": "SMTP not configured. Set SMTP_* env vars."}
+        return {"ok": False, "provider": "smtp", "note": "SMTP not configured. Set SMTP_* env vars."}
 
     cfg = _smtp_settings()
     msg = EmailMessage()
@@ -54,10 +114,28 @@ def send_email_alert(to_email: str, subject: str, body: str) -> Dict[str, Any]:
                 server.login(cfg["user"], cfg["password"])
                 server.send_message(msg)
 
-        return {"ok": True}
+        return {"ok": True, "provider": "smtp"}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "provider": "smtp", "error": str(e)}
 
+
+def send_email_alert(to_email: str, subject: str, body: str) -> Dict[str, Any]:
+    """
+    Provider selection:
+      1) Resend (preferred on Render)
+      2) SMTP fallback (useful locally)
+    """
+    if resend_configured():
+        out = _send_via_resend(to_email, subject, body)
+        # If Resend is configured but fails, return its error (don't silently fallback)
+        return out
+
+    return _send_via_smtp(to_email, subject, body)
+
+
+# ----------------------------
+# Alert logic helpers
+# ----------------------------
 
 def _confidence_rank(label: str) -> int:
     lab = (label or "").upper().strip()
