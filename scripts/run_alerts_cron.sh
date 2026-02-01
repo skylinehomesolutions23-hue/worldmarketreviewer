@@ -4,20 +4,13 @@ set -euo pipefail
 : "${ALERTS_BASE_URL:?Missing ALERTS_BASE_URL}"
 : "${ALERTS_CRON_KEY:?Missing ALERTS_CRON_KEY}"
 
-URL="${ALERTS_BASE_URL%/}/api/alerts/run?key=${ALERTS_CRON_KEY}"
+BASE="${ALERTS_BASE_URL%/}"
+KEY="${ALERTS_CRON_KEY}"
 
-# Optional: run for a specific email
-if [[ "${ALERTS_EMAIL:-}" != "" ]]; then
-  URL="${URL}&email=${ALERTS_EMAIL}"
-fi
+echo "[cron] POST $BASE/api/alerts/run?key=$KEY"
+curl -fsS -X POST "$BASE/api/alerts/run?key=$KEY" || true
+echo ""
 
-echo "[cron] POST ${URL}"
-
-curl -fsS -X POST \
-  --retry 3 \
-  --retry-delay 2 \
-  --connect-timeout 10 \
-  --max-time 120 \
-  "${URL}"
-
-echo "[cron] done"
+echo "[cron] POST $BASE/api/alerts/run_recap?key=$KEY"
+curl -fsS -X POST "$BASE/api/alerts/run_recap?key=$KEY" || true
+echo ""
