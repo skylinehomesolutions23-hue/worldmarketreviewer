@@ -12,37 +12,59 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+import TickerPicker from "@/components/TickerPicker";
+import { CATALOG_TICKERS, STARTER_TICKERS } from "@/components/tickers";
+
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
 const STORAGE_KEYS = {
   savedTickers: "wmr:savedTickers:v3",
+
+  // alerts tab prefs
   lastEmail: "wmr:alerts:lastEmail:v1",
-  lastTickers: "wmr:alerts:lastTickers:v1",
+  lastTickersText: "wmr:alerts:lastTickers:v1",
+  alertsTickers: "wmr:alerts:tickers:v1",
+
   lastMinConfidence: "wmr:alerts:lastMinConfidence:v1",
   lastMinProbUp: "wmr:alerts:lastMinProbUp:v1",
   lastHorizon: "wmr:alerts:lastHorizon:v1",
-  // NEW: local hint so we don't nag repeatedly
-  warnedNoSubsEndpoint: "wmr:alerts:warnedNoSubsEndpoint:v1",
 };
 
 type SubscribeRequest = {
   email: string;
-  tickers: string[];
+  enabled?: boolean;
+  tickers: string[]; // API accepts list or string in your backend; we send list
   min_confidence?: "LOW" | "MEDIUM" | "HIGH";
   min_prob_up?: number;
   horizon_days?: number;
+  source_pref?: string;
+  cooldown_minutes?: number;
 };
 
 type SubscriptionRow = {
   id?: string | number;
   email?: string;
-  tickers?: string[];
+  enabled?: boolean;
+  tickers?: string | string[];
+  tickers_list?: string[];
   min_confidence?: string;
   min_prob_up?: number;
   horizon_days?: number;
+  source_pref?: string;
+  cooldown_minutes?: number;
+  last_sent_at?: string | null;
   created_at?: string;
   updated_at?: string;
-  enabled?: boolean;
+  [k: string]: any;
+};
+
+type AlertEvent = {
+  id?: string | number;
+  email?: string;
+  ticker?: string;
+  event_type?: string;
+  payload?: any;
+  created_at?: string;
   [k: string]: any;
 };
 
@@ -53,22 +75,26 @@ function toUpperTicker(s: string) {
     .trim();
 }
 
-function normalizeTickers(input: string): string[] {
-  const parts = (input || "")
-    .replace(/\s+/g, ",")
-    .split(",")
-    .map((x) => toUpperTicker(x))
-    .filter(Boolean);
-
+function uniq(arr: string[]) {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const t of parts) {
-    if (!seen.has(t)) {
+  for (const x of arr || []) {
+    const t = toUpperTicker(x);
+    if (t && !seen.has(t)) {
       seen.add(t);
       out.push(t);
     }
   }
   return out;
+}
+
+function normalizeTickersText(input: string): string[] {
+  const parts = (input || "")
+    .replace(/\s+/g, ",")
+    .split(",")
+    .map((x) => toUpperTicker(x))
+    .filter(Boolean);
+  return uniq(parts);
 }
 
 function clamp01(x: any): number | null {
@@ -97,19 +123,45 @@ async function safeJson(res: Response) {
   }
 }
 
+async function readJsonArray(key: string): Promise<string[] | null> {
+  try {
+    const raw = await AsyncStorage.getItem(key);
+    if (!raw) return null;
+    const j = JSON.parse(raw);
+    if (Array.isArray(j)) return uniq(j.map(String));
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export default function AlertsTab() {
   const [email, setEmail] = useState("");
+
+  // manual text input (still supported)
   const [tickersText, setTickersText] = useState("SPY,QQQ");
+
+  // picker-driven tickers (what we actually use)
+  const [editing, setEditing] = useState(false);
+  const [alertsTickers, setAlertsTickers] = useState<string[]>(STARTER_TICKERS);
+
   const [minConfidence, setMinConfidence] = useState<"LOW" | "MEDIUM" | "HIGH">("HIGH");
   const [minProbUp, setMinProbUp] = useState("0.65");
   const [horizonDays, setHorizonDays] = useState("5");
 
   const [loading, setLoading] = useState(false);
-  const [subsLoading, setSubsLoading] = useState(false);
-  const [subs, setSubs] = useState<SubscriptionRow[]>([]);
 
+  // live subscription + events
+  const [subLoading, setSubLoading] = useState(false);
+  const [subscription, setSubscription] = useState<SubscriptionRow | null>(null);
+
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [events, setEvents] = useState<AlertEvent[]>([]);
+
+  // derive numbers safely
   const parsed = useMemo(() => {
-    const tickers = normalizeTickers(tickersText).slice(0, 25);
+    // prefer picker tickers; if empty, fall back to text
+    const tickers = (alertsTickers?.length ? alertsTickers : normalizeTickersText(tickersText)).slice(0, 25);
 
     let p = Number(minProbUp);
     if (!Number.isFinite(p)) p = 0.65;
@@ -120,33 +172,50 @@ export default function AlertsTab() {
     h = Math.max(1, Math.min(60, h));
 
     return { tickers, min_prob_up: p, horizon_days: h };
-  }, [tickersText, minProbUp, horizonDays]);
+  }, [alertsTickers, tickersText, minProbUp, horizonDays]);
 
+  // initial load
   useEffect(() => {
     (async () => {
       try {
-        const [savedTickers, lastEmail, lastTickers, lastConf, lastProb, lastH] =
-          await Promise.all([
-            AsyncStorage.getItem(STORAGE_KEYS.savedTickers),
-            AsyncStorage.getItem(STORAGE_KEYS.lastEmail),
-            AsyncStorage.getItem(STORAGE_KEYS.lastTickers),
-            AsyncStorage.getItem(STORAGE_KEYS.lastMinConfidence),
-            AsyncStorage.getItem(STORAGE_KEYS.lastMinProbUp),
-            AsyncStorage.getItem(STORAGE_KEYS.lastHorizon),
-          ]);
+        const [
+          savedTickersRaw,
+          savedEmail,
+          lastTickersText,
+          savedAlertsTickers,
+          lastConf,
+          lastProb,
+          lastH,
+        ] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_KEYS.savedTickers),
+          AsyncStorage.getItem(STORAGE_KEYS.lastEmail),
+          AsyncStorage.getItem(STORAGE_KEYS.lastTickersText),
+          readJsonArray(STORAGE_KEYS.alertsTickers),
+          AsyncStorage.getItem(STORAGE_KEYS.lastMinConfidence),
+          AsyncStorage.getItem(STORAGE_KEYS.lastMinProbUp),
+          AsyncStorage.getItem(STORAGE_KEYS.lastHorizon),
+        ]);
 
-        if (lastEmail) setEmail(String(lastEmail));
-        if (lastTickers) setTickersText(String(lastTickers));
+        if (savedEmail) setEmail(String(savedEmail));
 
-        if (!lastTickers && savedTickers) {
+        if (lastTickersText) setTickersText(String(lastTickersText));
+
+        // picker tickers: alertsTickers > saved watchlist tickers > starter
+        if (savedAlertsTickers && savedAlertsTickers.length) {
+          setAlertsTickers(savedAlertsTickers.slice(0, 40));
+        } else if (savedTickersRaw) {
           try {
-            const arr = JSON.parse(savedTickers);
+            const arr = JSON.parse(savedTickersRaw);
             if (Array.isArray(arr) && arr.length) {
-              setTickersText(arr.map(String).slice(0, 10).join(","));
+              setAlertsTickers(uniq(arr.map(String)).slice(0, 40));
+              // also set text for visibility
+              setTickersText(uniq(arr.map(String)).slice(0, 10).join(","));
             }
           } catch {
             // ignore
           }
+        } else {
+          setAlertsTickers(STARTER_TICKERS);
         }
 
         const c = String(lastConf || "").toUpperCase();
@@ -157,18 +226,33 @@ export default function AlertsTab() {
       } catch {
         // ignore
       } finally {
-        // Do not auto-fetch subscriptions from backend because endpoint isn't deployed.
-        refreshSubscriptions().catch(() => {});
+        // if we already have an email saved, load subscription + events
+        const em = (await AsyncStorage.getItem(STORAGE_KEYS.lastEmail)) || "";
+        if (em && isEmailLike(em)) {
+          await refreshSubscription(em).catch(() => {});
+          await refreshEvents(em).catch(() => {});
+        }
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // persist picker tickers whenever they change
+  useEffect(() => {
+    (async () => {
+      try {
+        await AsyncStorage.setItem(STORAGE_KEYS.alertsTickers, JSON.stringify(alertsTickers));
+      } catch {
+        // ignore
+      }
+    })();
+  }, [alertsTickers]);
+
   async function persistPrefs() {
     try {
       await Promise.all([
         AsyncStorage.setItem(STORAGE_KEYS.lastEmail, email.trim()),
-        AsyncStorage.setItem(STORAGE_KEYS.lastTickers, tickersText),
+        AsyncStorage.setItem(STORAGE_KEYS.lastTickersText, tickersText),
         AsyncStorage.setItem(STORAGE_KEYS.lastMinConfidence, minConfidence),
         AsyncStorage.setItem(STORAGE_KEYS.lastMinProbUp, String(parsed.min_prob_up)),
         AsyncStorage.setItem(STORAGE_KEYS.lastHorizon, String(parsed.horizon_days)),
@@ -178,24 +262,52 @@ export default function AlertsTab() {
     }
   }
 
-  // ✅ SAFE: backend list endpoint not deployed yet, so do NOT fetch it.
-  async function refreshSubscriptions() {
-    setSubsLoading(true);
-    try {
-      setSubs([]);
+  async function refreshSubscription(emOverride?: string) {
+    const em = (emOverride ?? email).trim().toLowerCase();
+    if (!isEmailLike(em)) return;
 
-      // One-time helpful hint (optional)
-      const warned = await AsyncStorage.getItem(STORAGE_KEYS.warnedNoSubsEndpoint);
-      if (!warned) {
-        await AsyncStorage.setItem(STORAGE_KEYS.warnedNoSubsEndpoint, "1");
-        // Keep it quiet by default. Uncomment if you want a one-time popup.
-        // Alert.alert(
-        //   "Subscriptions list",
-        //   "Your backend doesn't have GET /api/alerts/subscriptions yet, so the app can't show the subscription list."
-        // );
+    setSubLoading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/alerts/subscription?email=${encodeURIComponent(em)}`,
+        { method: "GET" }
+      );
+      const j = await safeJson(res);
+
+      if (!res.ok || !j?.ok) {
+        setSubscription(null);
+        return;
       }
+      setSubscription(j.subscription || null);
+    } catch {
+      setSubscription(null);
     } finally {
-      setSubsLoading(false);
+      setSubLoading(false);
+    }
+  }
+
+  async function refreshEvents(emOverride?: string) {
+    const em = (emOverride ?? email).trim().toLowerCase();
+    if (!isEmailLike(em)) return;
+
+    setEventsLoading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/alerts/events?email=${encodeURIComponent(em)}&limit=50`,
+        { method: "GET" }
+      );
+      const j = await safeJson(res);
+
+      if (!res.ok || !j?.ok) {
+        setEvents([]);
+        return;
+      }
+      const rows = Array.isArray(j.events) ? j.events : [];
+      setEvents(rows);
+    } catch {
+      setEvents([]);
+    } finally {
+      setEventsLoading(false);
     }
   }
 
@@ -204,19 +316,26 @@ export default function AlertsTab() {
     if (!isEmailLike(em)) return Alert.alert("Enter a valid email", "Example: you@email.com");
 
     if (parsed.tickers.length === 0) {
-      return Alert.alert("Add at least 1 ticker", "Example: SPY, QQQ, NVDA");
+      return Alert.alert("Add at least 1 ticker", "Pick tickers or type: SPY, QQQ, NVDA");
     }
 
     setLoading(true);
     try {
       await persistPrefs();
 
+      // keep text roughly in sync with picker (nice for visibility)
+      const shortText = parsed.tickers.slice(0, 10).join(",");
+      setTickersText(shortText);
+
       const body: SubscribeRequest = {
         email: em,
-        tickers: parsed.tickers,
+        enabled: true,
+        tickers: parsed.tickers.slice(0, 10), // backend enforces up to 10
         min_confidence: minConfidence,
         min_prob_up: parsed.min_prob_up,
         horizon_days: parsed.horizon_days,
+        source_pref: "auto",
+        cooldown_minutes: 360,
       };
 
       const res = await fetch(`${API_BASE}/api/alerts/subscribe`, {
@@ -235,14 +354,15 @@ export default function AlertsTab() {
 
       Alert.alert(
         "Subscribed",
-        `Email: ${em}\nTickers: ${parsed.tickers.join(", ")}\nMin conf: ${minConfidence}\nMin prob_up: ${fmtPct01(
+        `Email: ${em}\nTickers: ${body.tickers.join(", ")}\nMin conf: ${minConfidence}\nMin prob_up: ${fmtPct01(
           parsed.min_prob_up,
           0
         )}\nHorizon: ${parsed.horizon_days}d`
       );
 
-      // Keep UI stable (no backend list endpoint)
-      await refreshSubscriptions();
+      // now show real backend subscription + events
+      await refreshSubscription(em);
+      await refreshEvents(em);
     } catch (e: any) {
       Alert.alert("Network error", String(e?.message || e));
     } finally {
@@ -250,12 +370,13 @@ export default function AlertsTab() {
     }
   }
 
+  const topChips = useMemo(() => parsed.tickers.slice(0, 10), [parsed.tickers]);
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Alerts</Text>
       <Text style={styles.sub}>
-        Subscribe to email alerts from the backend. (Subscription list UI is disabled until the backend list endpoint
-        exists.)
+        Pick tickers + thresholds, then subscribe. This uses your Render backend alerts system.
       </Text>
 
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
@@ -273,7 +394,43 @@ export default function AlertsTab() {
             keyboardType="email-address"
           />
 
-          <Text style={styles.label}>Tickers (comma or space separated)</Text>
+          <View style={styles.rowBetween}>
+            <Text style={styles.label}>Tickers</Text>
+            <Pressable style={styles.outlineBtnSmall} onPress={() => setEditing((v) => !v)}>
+              <Text style={styles.outlineBtnTextSmall}>{editing ? "Done" : "Edit tickers"}</Text>
+            </Pressable>
+          </View>
+
+          {editing ? (
+            <View style={{ marginTop: 8 }}>
+              <TickerPicker
+                title="Alert tickers"
+                catalog={CATALOG_TICKERS}
+                selected={alertsTickers}
+                onChangeSelected={(next) => setAlertsTickers(uniq(next))}
+                maxSelected={40}
+              />
+              <Text style={styles.hint}>
+                Note: backend subscription stores up to 10 tickers. We’ll send your first 10.
+              </Text>
+            </View>
+          ) : null}
+
+          {/* Chips preview (what will be sent) */}
+          <View style={styles.chips}>
+            {topChips.length ? (
+              topChips.map((t) => (
+                <View key={t} style={styles.chip}>
+                  <Text style={styles.chipText}>{t}</Text>
+                </View>
+              ))
+            ) : (
+              <Text style={styles.muted}>No tickers selected yet.</Text>
+            )}
+          </View>
+
+          {/* Keep manual input as fallback (optional) */}
+          <Text style={styles.label}>Manual tickers (optional)</Text>
           <TextInput
             value={tickersText}
             onChangeText={setTickersText}
@@ -291,9 +448,9 @@ export default function AlertsTab() {
                 <Pressable
                   key={c}
                   onPress={() => setMinConfidence(c)}
-                  style={[styles.chip, on && styles.chipActive]}
+                  style={[styles.chipBtn, on && styles.chipActive]}
                 >
-                  <Text style={[styles.chipText, on && styles.chipTextActive]}>{c}</Text>
+                  <Text style={[styles.chipBtnText, on && styles.chipTextActive]}>{c}</Text>
                 </Pressable>
               );
             })}
@@ -328,36 +485,82 @@ export default function AlertsTab() {
           </Pressable>
 
           <Text style={styles.hint}>
-            This calls <Text style={styles.mono}>POST /api/alerts/subscribe</Text>.
+            Calls <Text style={styles.mono}>POST /api/alerts/subscribe</Text> then refreshes subscription + events.
           </Text>
         </View>
 
+        {/* Subscription */}
         <View style={styles.rowBetween}>
-          <Text style={styles.sectionTitle}>Subscriptions</Text>
-          <Pressable style={styles.outlineBtn} onPress={refreshSubscriptions} disabled={subsLoading}>
-            <Text style={styles.outlineBtnText}>{subsLoading ? "Loading..." : "Refresh"}</Text>
+          <Text style={styles.sectionTitle}>Your Subscription</Text>
+          <Pressable
+            style={styles.outlineBtn}
+            onPress={() => refreshSubscription().catch(() => {})}
+            disabled={subLoading}
+          >
+            <Text style={styles.outlineBtnText}>{subLoading ? "Loading..." : "Refresh"}</Text>
           </Pressable>
         </View>
 
-        {subsLoading ? <ActivityIndicator /> : null}
+        {subLoading ? <ActivityIndicator /> : null}
 
-        {subs.length === 0 ? (
+        {!subscription ? (
           <Text style={styles.muted}>
-            Subscription list isn’t available yet (backend is missing GET /api/alerts/subscriptions).
+            No subscription loaded. Enter your email and tap Refresh, or Subscribe.
           </Text>
         ) : (
-          subs.slice(0, 50).map((s, idx) => (
-            <View key={String(s.id ?? idx)} style={styles.item}>
-              <Text style={styles.itemTitle}>{String(s.email || "—")}</Text>
-              <Text style={styles.itemMeta}>
-                tickers: {Array.isArray(s.tickers) ? s.tickers.join(", ") : "—"}
-              </Text>
-              <Text style={styles.itemMeta}>
-                min_conf: {String(s.min_confidence || "—")} • min_prob_up:{" "}
-                {s.min_prob_up == null ? "—" : fmtPct01(s.min_prob_up, 0)} • horizon: {s.horizon_days ?? "—"}d
-              </Text>
-              {s.created_at ? <Text style={styles.itemSmall}>created_at: {String(s.created_at)}</Text> : null}
-              {s.updated_at ? <Text style={styles.itemSmall}>updated_at: {String(s.updated_at)}</Text> : null}
+          <View style={styles.item}>
+            <Text style={styles.itemTitle}>{String(subscription.email || "—")}</Text>
+            <Text style={styles.itemMeta}>
+              enabled: {String(subscription.enabled ?? true)} • cooldown: {subscription.cooldown_minutes ?? "—"} min
+            </Text>
+            <Text style={styles.itemMeta}>
+              min_conf: {String(subscription.min_confidence || "—")} • min_prob_up:{" "}
+              {subscription.min_prob_up == null ? "—" : fmtPct01(subscription.min_prob_up, 0)} • horizon:{" "}
+              {subscription.horizon_days ?? "—"}d
+            </Text>
+            <Text style={styles.itemMeta}>
+              tickers:{" "}
+              {Array.isArray(subscription.tickers_list)
+                ? subscription.tickers_list.join(", ")
+                : Array.isArray(subscription.tickers)
+                ? subscription.tickers.join(", ")
+                : String(subscription.tickers || "—")}
+            </Text>
+            {subscription.last_sent_at ? (
+              <Text style={styles.itemSmall}>last_sent_at: {String(subscription.last_sent_at)}</Text>
+            ) : null}
+          </View>
+        )}
+
+        {/* Events */}
+        <View style={styles.rowBetween}>
+          <Text style={styles.sectionTitle}>Recent Alert Events</Text>
+          <Pressable
+            style={styles.outlineBtn}
+            onPress={() => refreshEvents().catch(() => {})}
+            disabled={eventsLoading}
+          >
+            <Text style={styles.outlineBtnText}>{eventsLoading ? "Loading..." : "Refresh"}</Text>
+          </Pressable>
+        </View>
+
+        {eventsLoading ? <ActivityIndicator /> : null}
+
+        {events.length === 0 ? (
+          <Text style={styles.muted}>No events yet. Once alerts trigger, they’ll show up here.</Text>
+        ) : (
+          events.slice(0, 50).map((ev, idx) => (
+            <View key={String(ev.id ?? idx)} style={styles.item}>
+              <View style={styles.rowBetween}>
+                <Text style={styles.itemTitle}>{String(ev.ticker || "—")}</Text>
+                <Text style={styles.itemSmall}>{String(ev.created_at || "")}</Text>
+              </View>
+              <Text style={styles.itemMeta}>type: {String(ev.event_type || "—")}</Text>
+              {ev.payload ? (
+                <Text style={styles.itemSmall} numberOfLines={6}>
+                  payload: {JSON.stringify(ev.payload)}
+                </Text>
+              ) : null}
             </View>
           ))
         )}
@@ -403,8 +606,18 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: "white",
   },
-  chipActive: { borderColor: "#111", backgroundColor: "#111" },
   chipText: { fontWeight: "900", color: "#111", fontSize: 12 },
+
+  chipBtn: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "white",
+  },
+  chipActive: { borderColor: "#111", backgroundColor: "#111" },
+  chipBtnText: { fontWeight: "900", color: "#111", fontSize: 12 },
   chipTextActive: { color: "white" },
 
   row: { flexDirection: "row", gap: 10 },
@@ -433,6 +646,15 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   outlineBtnText: { fontWeight: "900", color: "#111" },
+
+  outlineBtnSmall: {
+    borderWidth: 1,
+    borderColor: "#111",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  outlineBtnTextSmall: { fontWeight: "900", color: "#111", fontSize: 12 },
 
   muted: { color: "#666" },
 

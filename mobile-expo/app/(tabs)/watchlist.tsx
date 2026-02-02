@@ -12,6 +12,9 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
 
+import TickerPicker from "@/components/TickerPicker";
+import { CATALOG_TICKERS, STARTER_TICKERS } from "@/components/tickers";
+
 const API_BASE = "https://worldmarketreviewer.onrender.com";
 
 const STORAGE_KEYS = {
@@ -93,7 +96,8 @@ async function loadSavedTickers(): Promise<string[]> {
     }
   }
 
-  return ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN"];
+  // fallback
+  return STARTER_TICKERS;
 }
 
 function fmtPct(x?: number | null) {
@@ -169,6 +173,7 @@ function Sparkline({
 
   if (!series) return null;
 
+  // NOTE: keeping your existing colors
   const barColor = series.up ? "#37D67A" : "#FF6B6B";
 
   return (
@@ -193,9 +198,12 @@ function Sparkline({
 }
 
 export default function WatchlistTab() {
-  const [tickers, setTickers] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [editing, setEditing] = useState(false);
 
+  // single source of truth for tickers
+  const [tickers, setTickers] = useState<string[]>(STARTER_TICKERS);
+
+  const [loading, setLoading] = useState(false);
   const [preds, setPreds] = useState<Prediction[]>([]);
   const [lastUpdated, setLastUpdated] = useState<string>("");
 
@@ -208,11 +216,24 @@ export default function WatchlistTab() {
 
   const top10 = useMemo(() => (tickers.length ? tickers.slice(0, 10) : []), [tickers]);
 
+  // Load saved tickers once
   useEffect(() => {
     loadSavedTickers()
-      .then((t) => setTickers(t))
-      .catch(() => setTickers(["SPY", "QQQ", "TSLA"]));
+      .then((t) => setTickers(t?.length ? t : STARTER_TICKERS))
+      .catch(() => setTickers(STARTER_TICKERS));
   }, []);
+
+  // Persist tickers whenever they change
+  useEffect(() => {
+    const save = async () => {
+      try {
+        await AsyncStorage.setItem("wmr:savedTickers:v3", JSON.stringify(tickers));
+      } catch {
+        // ignore
+      }
+    };
+    save();
+  }, [tickers]);
 
   function openNews(t: string) {
     const tk = toUpperTicker(t);
@@ -221,8 +242,6 @@ export default function WatchlistTab() {
 
   function openCompare(t: string) {
     const tk = toUpperTicker(t);
-    // compare.tsx uses AsyncStorage lastTickersInput; we’ll pass it via params if you support it,
-    // but even if not, Compare still works with its own input.
     router.push({ pathname: "/(tabs)/compare", params: { ticker: tk } });
   }
 
@@ -297,7 +316,8 @@ export default function WatchlistTab() {
   }
 
   async function runPredictions() {
-    const list = top10.length ? top10 : ["SPY", "QQQ", "TSLA"];
+    const list = top10.length ? top10 : STARTER_TICKERS.slice(0, 3);
+
     setLoading(true);
     setPreds([]);
 
@@ -348,13 +368,33 @@ export default function WatchlistTab() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Watchlist</Text>
-      <Text style={styles.sub}>Tracks your saved tickers (max 10). Includes mini sparklines.</Text>
+      <Text style={styles.sub}>
+        Tracks your saved tickers (top 10 used for predictions). Tap “Edit tickers” to change them.
+      </Text>
 
       <View style={styles.card}>
-        <Text style={styles.label}>Tracked</Text>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+          <Text style={styles.label}>Tracked</Text>
+
+          <Pressable style={styles.outlineBtn} onPress={() => setEditing((v) => !v)}>
+            <Text style={styles.outlineBtnText}>{editing ? "Done" : "Edit tickers"}</Text>
+          </Pressable>
+        </View>
+
+        {editing ? (
+          <View style={{ marginTop: 10 }}>
+            <TickerPicker
+              title="Watchlist tickers"
+              catalog={CATALOG_TICKERS}
+              selected={tickers}
+              onChangeSelected={(next) => setTickers(uniq(next))}
+              maxSelected={40}
+            />
+          </View>
+        ) : null}
 
         <View style={styles.chips}>
-          {(top10.length ? top10 : ["SPY", "QQQ", "TSLA"]).map((t) => (
+          {(top10.length ? top10 : STARTER_TICKERS.slice(0, 3)).map((t) => (
             <Pressable key={t} onPress={() => openNews(t)} style={styles.chip}>
               <Text style={styles.chipText}>{t}</Text>
             </Pressable>
@@ -458,6 +498,16 @@ const styles = StyleSheet.create({
     backgroundColor: "white",
   },
   chipText: { fontWeight: "800", color: "#111", fontSize: 12 },
+
+  outlineBtn: {
+    borderWidth: 1,
+    borderColor: "#111",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "white",
+  },
+  outlineBtnText: { fontWeight: "900", color: "#111", fontSize: 12 },
 
   button: {
     backgroundColor: "#111",
